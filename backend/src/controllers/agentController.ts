@@ -139,10 +139,17 @@ async function resolveProviderForMode(userId: string, mode: string) {
   }[mode]
 
   // Find a provider where the chosen model field is not null and is active.
+  const whereFilter: any = { 
+    userId, 
+    isActive: true 
+  };
+  whereFilter[mapField] = { not: null };
+
   const provider = await prisma.aIProvider.findFirst({
-    where: { userId, isActive: true, [mapField]: { not: null } },
+    where: whereFilter,
     orderBy: { updatedAt: 'desc' }
-  })
+  });
+
 
   if (!provider) throw new Error(`No active AI provider configured for mode ${mode}`)
   return provider
