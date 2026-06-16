@@ -1,0 +1,167 @@
+// Prisma Schema for Cloud Development Environment
+// Defines all database tables for user accounts, AI providers, and workspaces
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model - Authentication and user settings
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  name          String
+  avatarUrl     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  workspaces    Workspace[]
+  aiProviders   AIProvider[]
+  sessions      Session[]
+
+  @@index([email])
+}
+
+// Session model for authentication
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+}
+
+// AI Provider model - Dynamic provider registry
+model AIProvider {
+  id               String   @id @default(uuid())
+  userId           String
+  name             String   // User-defined name for the provider
+  type             ProviderType // openai, anthropic, generic-rest, etc.
+  baseURL          String   // Base API endpoint
+  apiKeyEncrypted  String   // Encrypted API key (AES-256-GCM)
+  modelName        String   // Default model (e.g., "gpt-4o", "claude-3-5-sonnet-20241022")
+  maxTokens        Int      @default(4096)
+  temperature      Float    @default(0.7)
+
+  // Execution mode mappings
+  liteModel        String?  // e.g., "gpt-4o-mini" or "gemini-flash"
+  economyModel     String?  // e.g., "gpt-4o" or "claude-3-haiku"
+  powerModel       String?  // e.g., "gpt-4o" or "claude-3-5-sonnet"
+  turboModel       String?  // e.g., "gpt-4-turbo" or "opus"
+
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([name, userId], unique: true)
+}
+
+enum ProviderType {
+  OPENAI
+  ANTHROPIC
+  GENERIC_REST
+  AZURE_OPENAI
+  GOOGLE_GENAI
+}
+
+// Workspace model - Project directories and files
+model Workspace {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String   // Project name
+  description String?
+  path        String   // Filesystem path (in container/sandbox)
+  isPublic    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files       File[]
+  folders     Folder[]
+
+  @@index([userId])
+  @@index([name, userId], unique: true)
+}
+
+// Folder model - Directory structure
+model Folder {
+  id          String   @id @default(uuid())
+  workspaceId String
+  parentId    String?  // Self-referencing for nested folders
+  name        String
+  path        String   // Full path from workspace root
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parent      Folder?   @relation("FolderParent", fields: [parentId], references: [id])
+  children    Folder[]  @relation("FolderParent")
+  files       File[]
+
+  @@index([workspaceId])
+  @@index([parentId])
+  @@index([workspaceId, path], unique: true)
+}
+
+// File model - Individual files in workspace
+model File {
+  id          String   @id @default(uuid())
+  workspaceId String
+  folderId    String?  // Null if in workspace root
+  name        String
+  extension   String?
+  path        String   // Full path from workspace root
+  content     String   @db.LongText
+  size        Int      @default(0)
+  isBinary    Boolean  @default(false)
+  mimeType    String?  // For binary files
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  folder      Folder?   @relation("FileFolder", fields: [folderId], references: [id])
+
+  @@index([workspaceId])
+  @@index([folderId])
+  @@index([workspaceId, path], unique: true)
+}
+
+// Optional: Execution logs for agent actions
+model ExecutionLog {
+  id        String   @id @default(uuid())
+  workspaceId String
+  userId    String
+  agentType String   // e.g., "code-generator", "debugger", "refactorer"
+  prompt    String
+  result    String?  // Success/error output
+  status    ExecutionStatus
+  startedAt DateTime @default(now())
+  finishedAt DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([status])
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
