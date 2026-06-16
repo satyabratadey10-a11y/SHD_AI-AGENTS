@@ -23,7 +23,11 @@
     "morgan": "^1.10.0",
     "openai": "^4.76.0",
     "prisma": "^5.22.0",
-    "ws": "^8.17.0"
+    "ws": "^8.17.0",
+    "uuid": "^9.0.1",
+    "node-pty": "^1.0.0",
+    "@types/morgan": "^1.9.4",
+    "@types/uuid": "^9.0.8"
   },
   "devDependencies": {
     "@types/bcrypt": "^5.0.2",
