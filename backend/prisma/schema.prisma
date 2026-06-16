@@ -65,7 +65,7 @@ model AIProvider {
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@index([name, userId], unique: true)
+  @@unique([name, userId])
 }
 
 enum ProviderType {
@@ -92,7 +92,7 @@ model Workspace {
   folders     Folder[]
 
   @@index([userId])
-  @@index([name, userId], unique: true)
+  @@unique([name, userId])
 }
 
 // Folder model - Directory structure
@@ -112,7 +112,7 @@ model Folder {
 
   @@index([workspaceId])
   @@index([parentId])
-  @@index([workspaceId, path], unique: true)
+  @@unique([workspaceId, path])
 }
 
 // File model - Individual files in workspace
@@ -135,7 +135,7 @@ model File {
 
   @@index([workspaceId])
   @@index([folderId])
-  @@index([workspaceId, path], unique: true)
+  @@unique([workspaceId, path])
 }
 
 // Optional: Execution logs for agent actions
