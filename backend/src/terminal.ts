@@ -23,7 +23,7 @@ export function attachPtyToSocket(ws: WebSocket) {
   })
 
   // Forward data from pty to the WebSocket client
-  ptyProcess.on('data', data => {
+  ptyProcess.onData(data => {
     if (ws.readyState === ws.OPEN) {
       ws.send(data)
     }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import * as Terminal from 'xterm'
+import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import { WebLinksAddon } from 'xterm-addon-web-links'
 
@@ -11,14 +11,14 @@ const TerminalContainer: React.FC<TerminalContainerProps> = ({
   wsUrl = 'ws://localhost:8080'
 }) => {
   const terminalRef = useRef<HTMLDivElement>(null)
-  const xtermRef = useRef<Terminal.Terminal | null>(null)
+  const xtermRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const [connected, setConnected] = useState(false)
 
   useEffect(() => {
     // Initialize terminal
-    const term = new Terminal.Terminal({
+    const term = new Terminal({
       cursorBlink: true,
       theme: {
         background: '#1e1e1e',
@@ -37,9 +37,10 @@ const TerminalContainer: React.FC<TerminalContainerProps> = ({
 
     // Open terminal in DOM
     if (terminalRef.current) {
-      term.attachTo(terminalRef.current)
+      term.open(terminalRef.current)
       fitAddon.fit()
     }
+
 
     // Connect WebSocket
     const ws = new WebSocket(wsUrl)

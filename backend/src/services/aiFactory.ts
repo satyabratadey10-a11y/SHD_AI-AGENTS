@@ -16,7 +16,7 @@ export interface AIProviderConfig {
   type: ProviderType
   modelName: string
   maxTokens?: number
-  temperature?: float
+  temperature?: number
   liteModel?: string
   economyModel?: string
   powerModel?: string
@@ -48,5 +48,26 @@ export async function createAIClient(providerId: string) {
     turboModel: provider.turboModel ?? undefined
   }
 
-  return config
+  let client: any = null
+  if (config.type === ProviderType.OPENAI) {
+    client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL })
+  } else if (config.type === ProviderType.ANTHROPIC) {
+    client = new Anthropic({ apiKey: config.apiKey })
+  } else {
+    // Generic REST client mock
+    client = {
+      chat: async (payload: any) => {
+        return {
+          choices: [{ message: { content: JSON.stringify({ actions: [] }) } }]
+        }
+      }
+    }
+  }
+
+  return {
+    client,
+    type: config.type,
+    getConfig: () => config
+  }
 }
+

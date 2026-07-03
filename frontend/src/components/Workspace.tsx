@@ -1,23 +1,18 @@
 import React, { useEffect, useRef } from 'react'
-import { MonacoEditor, IEditorProps } from '@monaco-editor/react'
+import Editor from '@monaco-editor/react'
 import TerminalContainer from './TerminalContainer'
 import { FileExplorer, AIProviders } from './UIComponents'
+import ws from '../wsConnection'
 
 interface WorkspaceProps {}
 
 const Workspace: React.FC<WorkspaceProps> = () => {
-  const editorRef = useRef<IEditorProps>({} as IEditorProps)
-  const chatMessageRef = useRef('')
+  const editorRef = useRef<any>(null)
+  const chatMessageRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => {
-    // Initialize WebSocket connection for terminal
-    const ws = new WebSocket('ws://localhost:8080')
-    ws.onmessage = (event) => {
-      // Handle terminal responses
-    }
-
-    return () => ws.close()
-  }, [])
+  const sendToTerminal = (message: string) => {
+    ws.send(message)
+  }
 
   return (
     <div className="workspace-layout">
@@ -28,11 +23,22 @@ const Workspace: React.FC<WorkspaceProps> = () => {
 
       <div className="editor-zone">
         <div className="code-editor">
-          <MonacoEditor editorRef={editorRef} />
+          <Editor
+            theme="vs-dark"
+            defaultLanguage="typescript"
+            onMount={(editor) => {
+              editorRef.current = editor
+            }}
+          />
         </div>
         <div className="chat-pane">
           <textarea ref={chatMessageRef} placeholder="Enter Agent command..."></textarea>
-          <button onClick={() => sendToTerminal(chatMessageRef.current)}>Run</button>
+          <button onClick={() => {
+            if (chatMessageRef.current) {
+              sendToTerminal(chatMessageRef.current.value)
+              chatMessageRef.current.value = ''
+            }
+          }}>Run</button>
         </div>
       </div>
 
@@ -40,6 +46,3 @@ const Workspace: React.FC<WorkspaceProps> = () => {
     </div>
   )
 }
-
-// UI Components would be implemented here
-// FileExplorer, AIProviders, etc.
