@@ -68,8 +68,7 @@ const TerminalContainer: React.FC<TerminalContainerProps> = ({
 
     // Handle user input
     term.onKey(e => {
-      const domEvent = e.domEvent as unknown as { altKey?: boolean, altGraphKey?: boolean, ctrlKey?: boolean, metaKey?: boolean };
-      const printable = !domEvent.altKey && !domEvent.altGraphKey && !domEvent.ctrlKey && !domEvent.metaKey
+      const printable = !e.domEvent.altKey && !e.domEvent.altGraphKey && !e.domEvent.ctrlKey && !e.domEvent.metaKey
       if (printable) {
         ws.send(e.key)
       }
