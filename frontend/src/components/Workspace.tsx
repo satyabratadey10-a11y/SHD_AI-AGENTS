@@ -46,3 +46,5 @@ const Workspace: React.FC<WorkspaceProps> = () => {
     </div>
   )
 }
+
+export default Workspace
