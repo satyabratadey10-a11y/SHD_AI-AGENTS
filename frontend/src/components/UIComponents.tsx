@@ -67,6 +67,8 @@ export const FileExplorer: React.FC<{ onSelect?: (path: string) => void }> = ({ 
 export const AIProviders: React.FC = () => {
   const [providers, setProviders] = useState<any[]>([])
   const [showModal, setShowModal] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [form, setForm] = useState({
     name: '',
     type: 'OPENAI',
@@ -78,7 +80,11 @@ export const AIProviders: React.FC = () => {
   const fetchProviders = async () => {
     try {
       const res = await axios.get('/api/providers')
-      setProviders(res.data)
+      if (Array.isArray(res.data)) {
+        setProviders(res.data)
+      } else {
+        console.error('Failed to load providers: response is not an array', res.data)
+      }
     } catch (e) {
       console.error('Failed to load providers', e)
     }
@@ -88,15 +94,31 @@ export const AIProviders: React.FC = () => {
     fetchProviders()
   }, [])
 
+  useEffect(() => {
+    if (!showModal) return
+    setError(null)
+    setIsSubmitting(false)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowModal(false)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showModal])
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setIsSubmitting(true)
+    setError(null)
     try {
       await axios.post('/api/providers', form)
       setShowModal(false)
       setForm({ name: '', type: 'OPENAI', baseURL: '', modelName: '', apiKey: '' })
       fetchProviders()
-    } catch (err) {
+    } catch (err: any) {
       console.error('Add provider error', err)
+      setError(err.response?.data?.message || err.message || 'Failed to add provider')
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
@@ -115,35 +137,92 @@ export const AIProviders: React.FC = () => {
       </button>
 
       {showModal && (
-        <div className="modal" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center'
-        }}>
-          <form onSubmit={handleSubmit} style={{ background: '#1e1e1e', padding: 20, borderRadius: 4 }}>
-            <h4>Add New Provider</h4>
-            <label>Name:<br />
-              <input type="text" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
-            </label><br />
-            <label>Type:<br />
-              <select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>
+        <div
+          className="modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-title"
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+          }}
+        >
+          <form onSubmit={handleSubmit} style={{ background: '#1e1e1e', padding: 20, borderRadius: 4, width: '300px' }}>
+            <h4 id="modal-title" style={{ marginTop: 0, marginBottom: 15 }}>Add New Provider</h4>
+
+            {error && (
+              <div style={{ color: '#ff6b6b', marginBottom: 10, fontSize: '0.85rem' }} role="alert">
+                {error}
+              </div>
+            )}
+
+            <label htmlFor="provider-name" style={{ display: 'block', marginBottom: 8 }}>Name:<br />
+              <input
+                id="provider-name"
+                type="text"
+                value={form.name}
+                onChange={e => setForm({ ...form, name: e.target.value })}
+                required
+                autoFocus
+                disabled={isSubmitting}
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+              />
+            </label>
+            <label htmlFor="provider-type" style={{ display: 'block', marginBottom: 8 }}>Type:<br />
+              <select
+                id="provider-type"
+                value={form.type}
+                onChange={e => setForm({ ...form, type: e.target.value })}
+                disabled={isSubmitting}
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+              >
                 <option value="OPENAI">OPENAI</option>
                 <option value="ANTHROPIC">ANTHROPIC</option>
                 <option value="GENERIC_REST">GENERIC_REST</option>
               </select>
-            </label><br />
-            <label>Base URL:<br />
-              <input type="url" value={form.baseURL} onChange={e => setForm({ ...form, baseURL: e.target.value })} required />
-            </label><br />
-            <label>Model Name:<br />
-              <input type="text" value={form.modelName} onChange={e => setForm({ ...form, modelName: e.target.value })} required />
-            </label><br />
-            <label>API Key:<br />
-              <input type="password" value={form.apiKey} onChange={e => setForm({ ...form, apiKey: e.target.value })} required />
-            </label><br />
-            <button type="submit" style={{ marginTop: 10 }}>Save</button>
-            <button type="button" onClick={() => setShowModal(false)} style={{ marginLeft: 10 }}>
-              Cancel
-            </button>
+            </label>
+            <label htmlFor="provider-url" style={{ display: 'block', marginBottom: 8 }}>Base URL:<br />
+              <input
+                id="provider-url"
+                type="url"
+                value={form.baseURL}
+                onChange={e => setForm({ ...form, baseURL: e.target.value })}
+                required
+                disabled={isSubmitting}
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+              />
+            </label>
+            <label htmlFor="provider-model" style={{ display: 'block', marginBottom: 8 }}>Model Name:<br />
+              <input
+                id="provider-model"
+                type="text"
+                value={form.modelName}
+                onChange={e => setForm({ ...form, modelName: e.target.value })}
+                required
+                disabled={isSubmitting}
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+              />
+            </label>
+            <label htmlFor="provider-key" style={{ display: 'block', marginBottom: 15 }}>API Key:<br />
+              <input
+                id="provider-key"
+                type="password"
+                value={form.apiKey}
+                onChange={e => setForm({ ...form, apiKey: e.target.value })}
+                required
+                disabled={isSubmitting}
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+              />
+            </label>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? 'Saving...' : 'Save'}
+              </button>
+              <button type="button" onClick={() => setShowModal(false)} disabled={isSubmitting}>
+                Cancel
+              </button>
+            </div>
           </form>
         </div>
       )}
