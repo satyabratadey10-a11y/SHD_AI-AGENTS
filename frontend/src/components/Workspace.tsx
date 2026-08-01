@@ -47,6 +47,7 @@ const Workspace: React.FC<WorkspaceProps> = () => {
             }}
           ></textarea>
           <button
+            type="button"
             aria-label="Run command"
             onClick={() => {
               if (chatMessageRef.current) {
