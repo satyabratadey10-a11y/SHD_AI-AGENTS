@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainWorkspace(viewModel: AgentViewModel) {
     var prompt by remember { mutableStateOf("") }
-    var apiKey by remember { mutableStateOf("my-api-key") }
+    var apiToken by remember { mutableStateOf("my-api-token") }
     var baseURL by remember { mutableStateOf("https://api.openai.com/v1") }
 
     Row(modifier = Modifier.fillMaxSize().background(Color(0xFF1E1E1E))) {
@@ -61,9 +61,9 @@ fun MainWorkspace(viewModel: AgentViewModel) {
                 colors = TextFieldDefaults.outlinedTextFieldColors(textColor = Color.White)
             )
             OutlinedTextField(
-                value = apiKey,
-                onValueChange = { apiKey = it },
-                label = { Text("API Key") },
+                value = apiToken,
+                onValueChange = { apiToken = it },
+                label = { Text("API Token") },
                 colors = TextFieldDefaults.outlinedTextFieldColors(textColor = Color.White)
             )
         }
@@ -86,7 +86,7 @@ fun MainWorkspace(viewModel: AgentViewModel) {
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Button(
-                    onClick = { viewModel.executeUserPrompt(prompt, apiKey, baseURL) },
+                    onClick = { viewModel.executeUserPrompt(prompt, apiToken, baseURL) },
                     enabled = !viewModel.isRunning.value,
                     modifier = Modifier.align(Alignment.CenterVertically)
                 ) {
