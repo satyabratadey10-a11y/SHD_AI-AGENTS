@@ -152,14 +152,18 @@ export async function isValidUrl(urlStr: string, allowLoopback = false): Promise
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
     const hostname = parsed.hostname.toLowerCase()
 
-    // If it's already an IP address, check it. If it's a hostname, resolve it via DNS first.
+    // If it's already an IP address, check it. If it's a hostname, resolve it via DNS resolver (safe & non-blocking) first.
     let ipAddresses: string[] = []
     if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
       ipAddresses.push(hostname)
     } else {
       try {
-        const lookup = await dns.promises.lookup(hostname, { all: true })
-        ipAddresses = lookup.map(addr => addr.address)
+        const ips = await dns.promises.resolve4(hostname).catch(() => [])
+        const ip6s = await dns.promises.resolve6(hostname).catch(() => [])
+        ipAddresses = [...ips, ...ip6s]
+        if (ipAddresses.length === 0) {
+          return false
+        }
       } catch {
         // DNS lookup failure: reject to remain secure
         return false
@@ -216,6 +220,25 @@ export function parseCommandArgs(command: string): string[] {
     args.push(match[1] ?? match[2] ?? match[3])
   }
   return args
+}
+
+/** Constructs a safe RegExp from user input, escaping dangerous ReDoS combinations */
+export function getSafeRegExp(pattern: string): RegExp {
+  const isUnsafe = pattern.length > 50 ||
+                   /\([^)]*[*+?][^)]*\)[*+?]/.test(pattern) ||
+                   /.*[*+?]{2,}/.test(pattern)
+
+  if (isUnsafe) {
+    const escaped = pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
+    return new RegExp(escaped)
+  }
+
+  try {
+    return new RegExp(pattern)
+  } catch {
+    const escaped = pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
+    return new RegExp(escaped)
+  }
 }
 
 /**
@@ -486,14 +509,8 @@ If you have completed your task, reply with:
             const files = await listDirFiles(targetPath, true)
             const results: Array<{ path: string; line: number; text: string }> = []
 
-            // Construct RegExp with guarded error handling
-            let patternRegex: RegExp
-            try {
-              patternRegex = new RegExp(act.pattern)
-            } catch (err: any) {
-              const escaped = act.pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
-              patternRegex = new RegExp(escaped)
-            }
+            // Construct safe RegExp
+            const patternRegex = getSafeRegExp(act.pattern)
 
             let scannedFilesCount = 0
             let totalMatchesFound = 0
@@ -681,8 +698,8 @@ If you have completed your task, reply with:
             const screenshotPath = resolveInWorkspace(filename)
             await pageInstance.screenshot({ path: screenshotPath, fullPage: true })
 
-            // Serialize console logs added since the prior action, bounding log maximum to 100 entries
-            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100)
+            // Correct relative log slicing with end bound (preventing empty console logs after 100 entries)
+            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, lastConsoleLogIdx + 100)
             lastConsoleLogIdx = consoleLogs.length
 
             const pageTitle = await pageInstance.title()
@@ -713,8 +730,8 @@ If you have completed your task, reply with:
             const screenshotPath = resolveInWorkspace(filename)
             await pageInstance.screenshot({ path: screenshotPath, fullPage: true })
 
-            // Serialize console logs added since the prior action, bounding log maximum to 100 entries
-            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100)
+            // Correct relative log slicing with end bound
+            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, lastConsoleLogIdx + 100)
             lastConsoleLogIdx = consoleLogs.length
 
             const auditReport = {
@@ -750,8 +767,8 @@ If you have completed your task, reply with:
             const screenshotPath = resolveInWorkspace(filename)
             await pageInstance.screenshot({ path: screenshotPath, fullPage: true })
 
-            // Serialize console logs added since the prior action, bounding log maximum to 100 entries
-            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100)
+            // Correct relative log slicing with end bound
+            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, lastConsoleLogIdx + 100)
             lastConsoleLogIdx = consoleLogs.length
 
             const auditReport = {

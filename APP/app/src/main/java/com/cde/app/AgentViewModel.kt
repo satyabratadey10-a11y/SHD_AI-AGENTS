@@ -19,7 +19,13 @@ class AgentViewModel : ViewModel() {
 
     private var ptyFd: Int = -1
 
+    // Scoped Storage compliant app private directory path
+    private val appSandboxPath = "/data/data/com.cde.app/files"
+
     init {
+        // Ensure private app directory is created
+        File(appSandboxPath).mkdirs()
+
         // Spawn local native shell on Android using C++ NDK/JNI
         viewModelScope.launch(Dispatchers.IO) {
             val shell = "/system/bin/sh"
@@ -43,7 +49,7 @@ class AgentViewModel : ViewModel() {
 
     fun refreshFiles() {
         viewModelScope.launch(Dispatchers.IO) {
-            val rootDir = File("/sdcard") // Android native storage path or app private files
+            val rootDir = File(appSandboxPath)
             val list = rootDir.listFiles()?.map { it.name } ?: emptyList()
             viewModelScope.launch(Dispatchers.Main) {
                 filesList.clear()
@@ -89,7 +95,7 @@ class AgentViewModel : ViewModel() {
                             if (type == "writeFile") {
                                 val path = act.optString("path")
                                 val content = act.optString("content")
-                                val file = File("/sdcard", path)
+                                val file = File(appSandboxPath, path)
                                 file.parentFile?.mkdirs()
                                 file.writeText(content)
                                 viewModelScope.launch(Dispatchers.Main) {

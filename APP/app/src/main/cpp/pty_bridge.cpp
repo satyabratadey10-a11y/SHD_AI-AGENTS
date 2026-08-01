@@ -16,6 +16,12 @@
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath, jobjectArray jArgs, jobjectArray jEnv) {
+    // Extract raw C-string BEFORE fork in the parent thread (fully fork-safe and deadlock-free)
+    const char *cShell = env->GetStringUTFChars(shellPath, NULL);
+    if (!cShell) {
+        return -1;
+    }
+
     int ptyMaster;
     pid_t pid;
 
@@ -23,12 +29,14 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
     ptyMaster = posix_openpt(O_RDWR | O_CLOEXEC);
     if (ptyMaster < 0) {
         LOGE("Failed to open pseudo-terminal master fd");
+        env->ReleaseStringUTFChars(shellPath, cShell);
         return -1;
     }
 
     if (grantpt(ptyMaster) < 0 || unlockpt(ptyMaster) < 0) {
         LOGE("Failed to grant or unlock pseudo-terminal");
         close(ptyMaster);
+        env->ReleaseStringUTFChars(shellPath, cShell);
         return -1;
     }
 
@@ -36,6 +44,7 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
     if (!slaveName) {
         LOGE("Failed to get slave terminal name");
         close(ptyMaster);
+        env->ReleaseStringUTFChars(shellPath, cShell);
         return -1;
     }
 
@@ -44,11 +53,12 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
     if (pid < 0) {
         LOGE("Fork failure");
         close(ptyMaster);
+        env->ReleaseStringUTFChars(shellPath, cShell);
         return -1;
     }
 
     if (pid == 0) {
-        // Slave/Child Process: Establish controlling terminal
+        // Slave/Child Process: Establish controlling terminal (no JVM/JNI references called!)
         setsid();
 
         int ptySlave = open(slaveName, O_RDWR);
@@ -66,8 +76,6 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
         }
         close(ptyMaster);
 
-        // Convert parameters to standard char arrays
-        const char *cShell = env->GetStringUTFChars(shellPath, NULL);
         char *args[] = { (char *)cShell, NULL };
 
         execvp(cShell, args);
@@ -75,6 +83,7 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
     } else {
         // Master/Parent Process
         LOGI("Successfully spawned shell child pid: %d, master fd: %d", pid, ptyMaster);
+        env->ReleaseStringUTFChars(shellPath, cShell);
         return ptyMaster;
     }
 }

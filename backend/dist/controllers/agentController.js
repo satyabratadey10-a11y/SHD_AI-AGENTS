@@ -11,6 +11,7 @@ exports.performWebSearch = performWebSearch;
 exports.parseIpv4ToLong = parseIpv4ToLong;
 exports.isValidUrl = isValidUrl;
 exports.parseCommandArgs = parseCommandArgs;
+exports.getSafeRegExp = getSafeRegExp;
 exports.runAgent = runAgent;
 const aiFactory_1 = require("../services/aiFactory");
 const child_process_1 = require("child_process");
@@ -146,15 +147,19 @@ async function isValidUrl(urlStr, allowLoopback = false) {
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
             return false;
         const hostname = parsed.hostname.toLowerCase();
-        // If it's already an IP address, check it. If it's a hostname, resolve it via DNS first.
+        // If it's already an IP address, check it. If it's a hostname, resolve it via DNS resolver (safe & non-blocking) first.
         let ipAddresses = [];
         if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
             ipAddresses.push(hostname);
         }
         else {
             try {
-                const lookup = await dns_1.default.promises.lookup(hostname, { all: true });
-                ipAddresses = lookup.map(addr => addr.address);
+                const ips = await dns_1.default.promises.resolve4(hostname).catch(() => []);
+                const ip6s = await dns_1.default.promises.resolve6(hostname).catch(() => []);
+                ipAddresses = [...ips, ...ip6s];
+                if (ipAddresses.length === 0) {
+                    return false;
+                }
             }
             catch {
                 // DNS lookup failure: reject to remain secure
@@ -218,6 +223,23 @@ function parseCommandArgs(command) {
         args.push(match[1] ?? match[2] ?? match[3]);
     }
     return args;
+}
+/** Constructs a safe RegExp from user input, escaping dangerous ReDoS combinations */
+function getSafeRegExp(pattern) {
+    const isUnsafe = pattern.length > 50 ||
+        /\([^)]*[*+?][^)]*\)[*+?]/.test(pattern) ||
+        /.*[*+?]{2,}/.test(pattern);
+    if (isUnsafe) {
+        const escaped = pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        return new RegExp(escaped);
+    }
+    try {
+        return new RegExp(pattern);
+    }
+    catch {
+        const escaped = pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        return new RegExp(escaped);
+    }
 }
 /**
  * Runs an autonomous agent loop (Replit Agent standard).
@@ -466,15 +488,8 @@ If you have completed your task, reply with:
                         const targetPath = act.path ? resolveInWorkspace(act.path) : WORKSPACE_ROOT;
                         const files = await listDirFiles(targetPath, true);
                         const results = [];
-                        // Construct RegExp with guarded error handling
-                        let patternRegex;
-                        try {
-                            patternRegex = new RegExp(act.pattern);
-                        }
-                        catch (err) {
-                            const escaped = act.pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-                            patternRegex = new RegExp(escaped);
-                        }
+                        // Construct safe RegExp
+                        const patternRegex = getSafeRegExp(act.pattern);
                         let scannedFilesCount = 0;
                         let totalMatchesFound = 0;
                         for (const f of files) {
@@ -650,8 +665,8 @@ If you have completed your task, reply with:
                         const filename = `screenshot_${Date.now()}_navigate.png`;
                         const screenshotPath = resolveInWorkspace(filename);
                         await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
-                        // Serialize console logs added since the prior action, bounding log maximum to 100 entries
-                        const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100);
+                        // Correct relative log slicing with end bound (preventing empty console logs after 100 entries)
+                        const logsSegment = consoleLogs.slice(lastConsoleLogIdx, lastConsoleLogIdx + 100);
                         lastConsoleLogIdx = consoleLogs.length;
                         const pageTitle = await pageInstance.title();
                         const auditReport = {
@@ -677,8 +692,8 @@ If you have completed your task, reply with:
                         const filename = `screenshot_${Date.now()}_click.png`;
                         const screenshotPath = resolveInWorkspace(filename);
                         await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
-                        // Serialize console logs added since the prior action, bounding log maximum to 100 entries
-                        const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100);
+                        // Correct relative log slicing with end bound
+                        const logsSegment = consoleLogs.slice(lastConsoleLogIdx, lastConsoleLogIdx + 100);
                         lastConsoleLogIdx = consoleLogs.length;
                         const auditReport = {
                             selector,
@@ -707,8 +722,8 @@ If you have completed your task, reply with:
                         const filename = `screenshot_${Date.now()}_type.png`;
                         const screenshotPath = resolveInWorkspace(filename);
                         await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
-                        // Serialize console logs added since the prior action, bounding log maximum to 100 entries
-                        const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100);
+                        // Correct relative log slicing with end bound
+                        const logsSegment = consoleLogs.slice(lastConsoleLogIdx, lastConsoleLogIdx + 100);
                         lastConsoleLogIdx = consoleLogs.length;
                         const auditReport = {
                             selector,
