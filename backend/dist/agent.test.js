@@ -85,19 +85,23 @@ const agentController_1 = require("./controllers/agentController");
     node_assert_1.default.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should capture stdout of echo Hello Agent command');
 });
 (0, node_test_1.default)('isValidUrl SSRF and DNS verification utility with mocked DNS', async () => {
-    // Update: Avoid live DNS resolution by stubbing dns.promises.lookup
-    const originalLookup = dns_1.default.promises.lookup;
-    dns_1.default.promises.lookup = (async (hostname, options) => {
+    // Update: Avoid live DNS resolution by stubbing dns.promises.resolve4 and resolve6
+    const originalResolve4 = dns_1.default.promises.resolve4;
+    const originalResolve6 = dns_1.default.promises.resolve6;
+    dns_1.default.promises.resolve4 = (async (hostname) => {
         if (hostname === 'example.com' || hostname === 'google.com') {
-            return [{ address: '93.184.216.34', family: 4 }];
+            return ['93.184.216.34'];
         }
         if (hostname === 'bad-dns-rebind.com') {
-            return [{ address: '127.0.0.1', family: 4 }];
+            return ['127.0.0.1'];
         }
         if (hostname === 'private-host.local') {
-            return [{ address: '10.0.0.1', family: 4 }];
+            return ['10.0.0.1'];
         }
         throw new Error('DNS lookup failed');
+    });
+    dns_1.default.promises.resolve6 = (async (hostname) => {
+        return [];
     });
     try {
         // Test valid public endpoints (should pass)
@@ -114,7 +118,8 @@ const agentController_1 = require("./controllers/agentController");
         node_assert_1.default.strictEqual(await (0, agentController_1.isValidUrl)('http://private-host.local/docs'), false);
     }
     finally {
-        dns_1.default.promises.lookup = originalLookup;
+        dns_1.default.promises.resolve4 = originalResolve4;
+        dns_1.default.promises.resolve6 = originalResolve6;
     }
 });
 (0, node_test_1.default)('parseCommandArgs shell command parser', () => {

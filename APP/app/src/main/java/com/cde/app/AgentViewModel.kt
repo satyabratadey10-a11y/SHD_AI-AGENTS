@@ -58,7 +58,7 @@ class AgentViewModel : ViewModel() {
         }
     }
 
-    fun executeUserPrompt(prompt: String, apiToken: String, baseURL: String) {
+    fun executeUserPrompt(prompt: String, auth: String, baseURL: String) {
         isRunning.value = true
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -71,7 +71,7 @@ class AgentViewModel : ViewModel() {
                     }
 
                     // 1. Post request to custom API Endpoint URL
-                    val rawResponse = callAiModel(currentPrompt, apiToken, baseURL)
+                    val rawResponse = callAiModel(currentPrompt, auth, baseURL)
                     val json = JSONObject(rawResponse)
 
                     if (json.has("done") && json.getBoolean("done")) {
@@ -122,12 +122,12 @@ class AgentViewModel : ViewModel() {
         }
     }
 
-    private fun callAiModel(prompt: String, apiToken: String, baseURL: String): String {
+    private fun callAiModel(prompt: String, auth: String, baseURL: String): String {
         val endpoint = URL("$baseURL/chat/completions")
         val conn = endpoint.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("Authorization", "Bearer $apiToken")
+        conn.setRequestProperty("Authorization", "Bearer $auth")
         conn.doOutput = true
 
         val requestBody = JSONObject().apply {

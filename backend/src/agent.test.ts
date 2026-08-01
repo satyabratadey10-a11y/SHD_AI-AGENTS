@@ -99,19 +99,25 @@ test('execPromise execution utility', async () => {
 })
 
 test('isValidUrl SSRF and DNS verification utility with mocked DNS', async () => {
-  // Update: Avoid live DNS resolution by stubbing dns.promises.lookup
-  const originalLookup = dns.promises.lookup
-  dns.promises.lookup = (async (hostname: string, options?: any) => {
+  // Update: Avoid live DNS resolution by stubbing dns.promises.resolve4 and resolve6
+  const originalResolve4 = dns.promises.resolve4
+  const originalResolve6 = dns.promises.resolve6
+
+  dns.promises.resolve4 = (async (hostname: string) => {
     if (hostname === 'example.com' || hostname === 'google.com') {
-      return [{ address: '93.184.216.34', family: 4 }] as any
+      return ['93.184.216.34']
     }
     if (hostname === 'bad-dns-rebind.com') {
-      return [{ address: '127.0.0.1', family: 4 }] as any
+      return ['127.0.0.1']
     }
     if (hostname === 'private-host.local') {
-      return [{ address: '10.0.0.1', family: 4 }] as any
+      return ['10.0.0.1']
     }
     throw new Error('DNS lookup failed')
+  }) as any
+
+  dns.promises.resolve6 = (async (hostname: string) => {
+    return []
   }) as any
 
   try {
@@ -130,7 +136,8 @@ test('isValidUrl SSRF and DNS verification utility with mocked DNS', async () =>
     assert.strictEqual(await isValidUrl('http://bad-dns-rebind.com:8080'), false)
     assert.strictEqual(await isValidUrl('http://private-host.local/docs'), false)
   } finally {
-    dns.promises.lookup = originalLookup
+    dns.promises.resolve4 = originalResolve4
+    dns.promises.resolve6 = originalResolve6
   }
 })
 
