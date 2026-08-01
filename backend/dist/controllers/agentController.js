@@ -87,7 +87,7 @@ async function performWebSearch(query) {
 /**
  * Runs an autonomous agent loop (Replit Agent standard).
  *
- * Supports the following 13 Replit Agent tool/function callings:
+ * Supports the following 14 Replit Agent tool/function callings:
  * - readFile: Reads file contents.
  * - writeFile: Writes file contents.
  * - patchFile: Rewrites only specific blocks of code (search and replace).
@@ -101,6 +101,7 @@ async function performWebSearch(query) {
  * - dbQuery: Directly queries Postgres database via Prisma.
  * - installPackages: Installs packages using NPM.
  * - getServiceStatus: Collects OS & workspace process details.
+ * - testProduct (or verifyWebPage): Automatically tests and audits a created web product's loading, structures, and accessibility.
  *
  * Tool execution feedback is passed directly to the model in subsequent turns.
  */
@@ -116,7 +117,7 @@ async function runAgent(req, res) {
         const askModel = async (messages) => {
             const cfg = getConfig();
             // Send message list to appropriate client SDK
-            if (type === aiFactory_1.ProviderType.OPENAI) {
+            if (type === aiFactory_1.ProviderType.OPENAI || type === aiFactory_1.ProviderType.GENERIC_REST) {
                 const response = await client.chat.completions.create({
                     model: cfg.modelName,
                     messages,
@@ -140,7 +141,7 @@ async function runAgent(req, res) {
                 return response.content[0].text;
             }
             else {
-                // Generic REST – assume it follows OpenAI‑style payload
+                // Fallback REST caller
                 const resp = await client.chat({ messages, max_tokens: cfg.maxTokens });
                 return resp.choices[0].message.content;
             }
@@ -153,7 +154,7 @@ Do not include conversational filler outside of the JSON block. Your responses s
 
 If you are finished with the task, specify "done": true and include a "finalMessage" summarizing your accomplishments.
 
-Here are the 13 tools you can use by including them in the "actions" array:
+Here are the 14 tools you can use by including them in the "actions" array:
 1. { "type": "readFile", "path": string } -> Returns file content.
 2. { "type": "writeFile", "path": string, "content": string } -> Overwrites/writes file.
 3. { "type": "patchFile", "path": string, "search": string, "replace": string } -> Replaces search string with replace string in path.
@@ -167,6 +168,7 @@ Here are the 13 tools you can use by including them in the "actions" array:
 11. { "type": "dbQuery", "query": string } -> Runs SQL commands on the database.
 12. { "type": "installPackages", "packages": string[] } -> Installs NPM packages.
 13. { "type": "getServiceStatus" } -> Gets OS & system environments.
+14. { "type": "testProduct", "url": string } (or { "type": "verifyWebPage", "url": string }) -> Tests page load, HTML structure, and accessibility/A11y metrics for a created web product.
 
 Example response:
 {
@@ -359,6 +361,60 @@ If you have completed your task, reply with:
                         };
                         resultItem.status = 'success';
                         resultItem.output = JSON.stringify(osInfo, null, 2);
+                    }
+                    else if (act.type === 'testProduct' || act.type === 'verifyWebPage') {
+                        const url = act.url;
+                        const response = await fetch(url);
+                        const html = await response.text();
+                        const status = response.status;
+                        const contentType = response.headers.get('content-type') || '';
+                        // Perform basic HTML structure checks
+                        const hasHtmlTag = /<html/i.test(html);
+                        const hasBodyTag = /<body/i.test(html);
+                        const hasDocType = /<!DOCTYPE html/i.test(html);
+                        const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
+                        const title = titleMatch ? titleMatch[1].trim() : 'No Title';
+                        // Find common DOM features
+                        const buttonCount = (html.match(/<button/gi) || []).length;
+                        const inputCount = (html.match(/<input/gi) || []).length;
+                        const linkCount = (html.match(/<a\s/gi) || []).length;
+                        const formCount = (html.match(/<form/gi) || []).length;
+                        const divCount = (html.match(/<div/gi) || []).length;
+                        // Perform simple accessibility/A11y audits
+                        const imageCount = (html.match(/<img/gi) || []).length;
+                        const imagesWithAlt = (html.match(/<img[^>]+alt=/gi) || []).length;
+                        const imagesMissingAlt = imageCount - imagesWithAlt;
+                        const inputsWithLabel = (html.match(/<label[^>]*>|<input[^>]+aria-label=/gi) || []).length;
+                        const ariaLabelsUsed = (html.match(/aria-label=|aria-labelledby=|aria-describedby=/gi) || []).length;
+                        const audit = {
+                            url,
+                            status,
+                            contentType,
+                            pageLoadSuccess: status >= 200 && status < 300,
+                            structure: {
+                                hasDocType,
+                                hasHtmlTag,
+                                hasBodyTag,
+                                title,
+                                elements: {
+                                    divs: divCount,
+                                    buttons: buttonCount,
+                                    inputs: inputCount,
+                                    links: linkCount,
+                                    forms: formCount
+                                }
+                            },
+                            accessibility: {
+                                imagesTotal: imageCount,
+                                imagesWithAltAttribute: imagesWithAlt,
+                                imagesMissingAltAttribute: imagesMissingAlt,
+                                inputsWithAssociatedLabel: inputsWithLabel,
+                                ariaAttributesTotal: ariaLabelsUsed,
+                                scorePercent: imageCount === 0 ? 100 : Math.round((imagesWithAlt / imageCount) * 100)
+                            }
+                        };
+                        resultItem.status = 'success';
+                        resultItem.output = JSON.stringify(audit, null, 2);
                     }
                     else {
                         throw new Error(`Unsupported action type: ${act.type}`);

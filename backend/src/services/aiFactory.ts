@@ -54,11 +54,36 @@ export async function createAIClient(providerId: string) {
   } else if (config.type === ProviderType.ANTHROPIC) {
     client = new Anthropic({ apiKey: config.apiKey })
   } else {
-    // Generic REST client mock
+    // Generic REST client - full OpenAI-compatible API caller
     client = {
-      chat: async (payload: any) => {
-        return {
-          choices: [{ message: { content: JSON.stringify({ actions: [] }) } }]
+      chat: {
+        completions: {
+          create: async (payload: { model?: string; messages: any[]; max_tokens?: number; temperature?: number }) => {
+            const apiBase = config.baseURL || 'https://api.openai.com/v1'
+            const endpoint = apiBase.endsWith('/') ? `${apiBase}chat/completions` : `${apiBase}/chat/completions`
+
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`
+              },
+              body: JSON.stringify({
+                model: payload.model || config.modelName,
+                messages: payload.messages,
+                max_tokens: payload.max_tokens || config.maxTokens,
+                temperature: payload.temperature !== undefined ? payload.temperature : config.temperature
+              })
+            })
+
+            if (!response.ok) {
+              const errBody = await response.text().catch(() => '')
+              throw new Error(`Generic REST API error (status ${response.status}): ${errBody}`)
+            }
+
+            const data = await response.json()
+            return data
+          }
         }
       }
     }
@@ -70,4 +95,3 @@ export async function createAIClient(providerId: string) {
     getConfig: () => config
   }
 }
-
