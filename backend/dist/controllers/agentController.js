@@ -13,6 +13,7 @@ const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const os_1 = __importDefault(require("os"));
 const client_1 = require("@prisma/client");
+const puppeteer_core_1 = __importDefault(require("puppeteer-core"));
 // Instantiate a single global Prisma client to prevent connection pool leaks
 const prisma = new client_1.PrismaClient();
 /** Promisified exec */
@@ -87,7 +88,7 @@ async function performWebSearch(query) {
 /**
  * Runs an autonomous agent loop (Replit Agent standard).
  *
- * Supports the following 14 Replit Agent tool/function callings:
+ * Supports the following 16 Replit Agent tool/function callings:
  * - readFile: Reads file contents.
  * - writeFile: Writes file contents.
  * - patchFile: Rewrites only specific blocks of code (search and replace).
@@ -101,7 +102,9 @@ async function performWebSearch(query) {
  * - dbQuery: Directly queries Postgres database via Prisma.
  * - installPackages: Installs packages using NPM.
  * - getServiceStatus: Collects OS & workspace process details.
- * - testProduct (or verifyWebPage): Automatically tests and audits a created web product's loading, structures, and accessibility.
+ * - browserNavigate: Launches a headless browser, opens any local or remote URL, captures real-time console logs, and saves a visual screenshot of the rendered app.
+ * - browserInteractClick: Simulates a real human clicking on a specified selector or text, updating the browser state and saving a post-click visual screenshot.
+ * - browserInteractType: Simulates a real human keyboard typing text into an input field key-by-key, triggering all browser change events, and saving a post-typing visual screenshot.
  *
  * Tool execution feedback is passed directly to the model in subsequent turns.
  */
@@ -110,6 +113,9 @@ async function runAgent(req, res) {
     if (!prompt || !mode || !userId) {
         return res.status(400).json({ error: 'Missing prompt, mode or userId' });
     }
+    let browserInstance = null;
+    let pageInstance = null;
+    const consoleLogs = [];
     try {
         const provider = await resolveProviderForMode(userId, mode);
         const { client, type, getConfig } = await (0, aiFactory_1.createAIClient)(provider.id);
@@ -154,7 +160,7 @@ Do not include conversational filler outside of the JSON block. Your responses s
 
 If you are finished with the task, specify "done": true and include a "finalMessage" summarizing your accomplishments.
 
-Here are the 14 tools you can use by including them in the "actions" array:
+Here are the 16 tools you can use by including them in the "actions" array:
 1. { "type": "readFile", "path": string } -> Returns file content.
 2. { "type": "writeFile", "path": string, "content": string } -> Overwrites/writes file.
 3. { "type": "patchFile", "path": string, "search": string, "replace": string } -> Replaces search string with replace string in path.
@@ -168,13 +174,16 @@ Here are the 14 tools you can use by including them in the "actions" array:
 11. { "type": "dbQuery", "query": string } -> Runs SQL commands on the database.
 12. { "type": "installPackages", "packages": string[] } -> Installs NPM packages.
 13. { "type": "getServiceStatus" } -> Gets OS & system environments.
-14. { "type": "testProduct", "url": string } (or { "type": "verifyWebPage", "url": string }) -> Tests page load, HTML structure, and accessibility/A11y metrics for a created web product.
+14. { "type": "browserNavigate", "url": string } -> Opens a headless Chrome browser, navigates to the URL, listens to console logs, and saves a full-page screenshot.
+15. { "type": "browserInteractClick", "selector": string } -> Clicks on an HTML selector on the active browser page like a real human, and captures an updated screenshot.
+16. { "type": "browserInteractType", "selector": string, "text": string } -> Inputs text key-by-key like a real keyboard into the active browser page selector, and captures an updated screenshot.
 
 Example response:
 {
   "actions": [
-    { "type": "readFile", "path": "src/server.ts" },
-    { "type": "runShell", "command": "npm test" }
+    { "type": "browserNavigate", "url": "http://localhost:8080" },
+    { "type": "browserInteractType", "selector": "#username", "text": "jules" },
+    { "type": "browserInteractClick", "selector": "button[type='submit']" }
   ]
 }
 
@@ -238,7 +247,7 @@ If you have completed your task, reply with:
             // 3. Execute actions in order and capture outputs
             const actionResults = [];
             for (const act of actions) {
-                const resultItem = { type: act.type, path: act.path || act.command || act.query || act.url || '' };
+                const resultItem = { type: act.type, path: act.path || act.command || act.query || act.url || act.selector || '' };
                 try {
                     if (act.type === 'readFile') {
                         const absolutePath = path_1.default.resolve(act.path);
@@ -362,59 +371,82 @@ If you have completed your task, reply with:
                         resultItem.status = 'success';
                         resultItem.output = JSON.stringify(osInfo, null, 2);
                     }
-                    else if (act.type === 'testProduct' || act.type === 'verifyWebPage') {
+                    else if (act.type === 'browserNavigate') {
+                        // Setup Chromium browser instance if it is not already running
+                        if (!browserInstance) {
+                            browserInstance = await puppeteer_core_1.default.launch({
+                                executablePath: '/usr/bin/google-chrome',
+                                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+                            });
+                            pageInstance = await browserInstance.newPage();
+                            await pageInstance.setViewport({ width: 1280, height: 800 });
+                            // Listen to real-time console messages and log them
+                            pageInstance.on('console', (msg) => {
+                                const logStr = `[Browser Console] ${msg.type().toUpperCase()}: ${msg.text()}`;
+                                consoleLogs.push(logStr);
+                            });
+                        }
                         const url = act.url;
-                        const response = await fetch(url);
-                        const html = await response.text();
-                        const status = response.status;
-                        const contentType = response.headers.get('content-type') || '';
-                        // Perform basic HTML structure checks
-                        const hasHtmlTag = /<html/i.test(html);
-                        const hasBodyTag = /<body/i.test(html);
-                        const hasDocType = /<!DOCTYPE html/i.test(html);
-                        const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
-                        const title = titleMatch ? titleMatch[1].trim() : 'No Title';
-                        // Find common DOM features
-                        const buttonCount = (html.match(/<button/gi) || []).length;
-                        const inputCount = (html.match(/<input/gi) || []).length;
-                        const linkCount = (html.match(/<a\s/gi) || []).length;
-                        const formCount = (html.match(/<form/gi) || []).length;
-                        const divCount = (html.match(/<div/gi) || []).length;
-                        // Perform simple accessibility/A11y audits
-                        const imageCount = (html.match(/<img/gi) || []).length;
-                        const imagesWithAlt = (html.match(/<img[^>]+alt=/gi) || []).length;
-                        const imagesMissingAlt = imageCount - imagesWithAlt;
-                        const inputsWithLabel = (html.match(/<label[^>]*>|<input[^>]+aria-label=/gi) || []).length;
-                        const ariaLabelsUsed = (html.match(/aria-label=|aria-labelledby=|aria-describedby=/gi) || []).length;
-                        const audit = {
+                        await pageInstance.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                        // Capture a high-resolution screenshot
+                        const screenshotPath = path_1.default.resolve(process.cwd(), 'screenshot_navigate.png');
+                        await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
+                        const pageTitle = await pageInstance.title();
+                        const auditReport = {
+                            title: pageTitle,
                             url,
-                            status,
-                            contentType,
-                            pageLoadSuccess: status >= 200 && status < 300,
-                            structure: {
-                                hasDocType,
-                                hasHtmlTag,
-                                hasBodyTag,
-                                title,
-                                elements: {
-                                    divs: divCount,
-                                    buttons: buttonCount,
-                                    inputs: inputCount,
-                                    links: linkCount,
-                                    forms: formCount
-                                }
-                            },
-                            accessibility: {
-                                imagesTotal: imageCount,
-                                imagesWithAltAttribute: imagesWithAlt,
-                                imagesMissingAltAttribute: imagesMissingAlt,
-                                inputsWithAssociatedLabel: inputsWithLabel,
-                                ariaAttributesTotal: ariaLabelsUsed,
-                                scorePercent: imageCount === 0 ? 100 : Math.round((imagesWithAlt / imageCount) * 100)
-                            }
+                            screenshot: screenshotPath,
+                            consoleLogs: consoleLogs,
+                            status: 'success'
                         };
                         resultItem.status = 'success';
-                        resultItem.output = JSON.stringify(audit, null, 2);
+                        resultItem.output = JSON.stringify(auditReport, null, 2);
+                    }
+                    else if (act.type === 'browserInteractClick') {
+                        if (!pageInstance) {
+                            throw new Error('No active browser page session. Please run browserNavigate first.');
+                        }
+                        const selector = act.selector;
+                        await pageInstance.waitForSelector(selector, { timeout: 10000 });
+                        await pageInstance.click(selector);
+                        // Wait for visual transitions/loads
+                        await new Promise(r => setTimeout(r, 1000));
+                        const screenshotPath = path_1.default.resolve(process.cwd(), 'screenshot_click.png');
+                        await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
+                        const auditReport = {
+                            selector,
+                            screenshot: screenshotPath,
+                            consoleLogs: consoleLogs,
+                            status: 'success'
+                        };
+                        resultItem.status = 'success';
+                        resultItem.output = JSON.stringify(auditReport, null, 2);
+                    }
+                    else if (act.type === 'browserInteractType') {
+                        if (!pageInstance) {
+                            throw new Error('No active browser page session. Please run browserNavigate first.');
+                        }
+                        const selector = act.selector;
+                        const text = act.text;
+                        await pageInstance.waitForSelector(selector, { timeout: 10000 });
+                        // Clear input first
+                        await pageInstance.click(selector, { clickCount: 3 });
+                        await pageInstance.keyboard.press('Backspace');
+                        // Type key-by-key like a real keyboard input
+                        await pageInstance.type(selector, text, { delay: 100 });
+                        // Wait for actions to register
+                        await new Promise(r => setTimeout(r, 500));
+                        const screenshotPath = path_1.default.resolve(process.cwd(), 'screenshot_type.png');
+                        await pageInstance.screenshot({ path: screenshotPath, fullPage: true });
+                        const auditReport = {
+                            selector,
+                            text,
+                            screenshot: screenshotPath,
+                            consoleLogs: consoleLogs,
+                            status: 'success'
+                        };
+                        resultItem.status = 'success';
+                        resultItem.output = JSON.stringify(auditReport, null, 2);
                     }
                     else {
                         throw new Error(`Unsupported action type: ${act.type}`);
@@ -431,7 +463,7 @@ If you have completed your task, reply with:
             messages.push({
                 role: 'user',
                 content: `Executed ${actionResults.length} actions. Results:\n` +
-                    actionResults.map((r, idx) => `Action #${idx + 1} (${r.type} ${r.path}):\nStatus: ${r.status}\nOutput:\n${r.output}`).join('\n\n')
+                    actionResults.map((r, idx) => `Action #${idx + 1} (${r.type} ${r.path || ''}):\nStatus: ${r.status}\nOutput:\n${r.output}`).join('\n\n')
             });
         }
         // Exhausted iterations without success.
@@ -444,6 +476,12 @@ If you have completed your task, reply with:
     catch (err) {
         console.error('Agent error:', err);
         return res.status(500).json({ error: err.message });
+    }
+    finally {
+        // Gracefully close any leftover headless browser instance to prevent process leak
+        if (browserInstance) {
+            await browserInstance.close().catch(() => { });
+        }
     }
 }
 /** Resolve the appropriate AIProvider record for a given user+mode */

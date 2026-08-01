@@ -6,6 +6,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const node_test_1 = __importDefault(require("node:test"));
 const node_assert_1 = __importDefault(require("node:assert"));
 const path_1 = __importDefault(require("path"));
+const http_1 = __importDefault(require("http"));
+const fs_1 = require("fs");
+const puppeteer_core_1 = __importDefault(require("puppeteer-core"));
 const agentController_1 = require("./controllers/agentController");
 (0, node_test_1.default)('listDirFiles utility', async () => {
     const files = await (0, agentController_1.listDirFiles)(path_1.default.resolve(__dirname, '../../backend/src'), true);
@@ -22,149 +25,96 @@ const agentController_1 = require("./controllers/agentController");
     const result = await (0, agentController_1.execPromise)('echo "Hello Agent"');
     node_assert_1.default.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should correctly capture stdout of executed command');
 });
-(0, node_test_1.default)('GENERIC_REST custom AI client endpoint and header parsing', async (t) => {
-    // Mock global.fetch to intercept API call from GENERIC_REST client
-    const originalFetch = global.fetch;
-    let fetchEndpoint = '';
-    let fetchOptions = null;
-    global.fetch = async (url, options) => {
-        fetchEndpoint = url.toString();
-        fetchOptions = options;
-        return {
-            ok: true,
-            status: 200,
-            json: async () => ({
-                choices: [{ message: { content: '{"actions":[{"type":"runShell","command":"echo Success"}]}' } }]
-            })
-        };
-    };
-    try {
-        // Let's manually invoke the GENERIC_REST completion handler
-        const mockConfig = {
-            apiKey: 'test-api-key',
-            baseURL: 'https://custom-ai-endpoint.com/v2',
-            type: 'GENERIC_REST',
-            modelName: 'deepseek-coder'
-        };
-        // Since createAIClient connects to Prisma, we can test the GENERIC_REST completions directly:
-        const mockGenericClient = {
-            chat: {
-                completions: {
-                    create: async (payload) => {
-                        const apiBase = mockConfig.baseURL;
-                        const endpoint = apiBase.endsWith('/') ? `${apiBase}chat/completions` : `${apiBase}/chat/completions`;
-                        const response = await fetch(endpoint, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${mockConfig.apiKey}`
-                            },
-                            body: JSON.stringify({
-                                model: payload.model || mockConfig.modelName,
-                                messages: payload.messages
-                            })
-                        });
-                        return await response.json();
-                    }
-                }
-            }
-        };
-        const payload = {
-            messages: [{ role: 'user', content: 'test prompt' }]
-        };
-        const response = await mockGenericClient.chat.completions.create(payload);
-        // Assert endpoint structure is parsed and correct
-        node_assert_1.default.strictEqual(fetchEndpoint, 'https://custom-ai-endpoint.com/v2/chat/completions');
-        node_assert_1.default.strictEqual(fetchOptions.method, 'POST');
-        node_assert_1.default.strictEqual(fetchOptions.headers['Authorization'], 'Bearer test-api-key');
-        node_assert_1.default.strictEqual(fetchOptions.headers['Content-Type'], 'application/json');
-        // Assert response is parsed correctly
-        node_assert_1.default.ok(response.choices[0].message.content.includes('echo Success'));
-    }
-    finally {
-        global.fetch = originalFetch;
-    }
-});
-(0, node_test_1.default)('testProduct / verifyWebPage html element extraction & accessibility scoring', async () => {
-    const originalFetch = global.fetch;
-    // Mock fetch to return a test HTML page representing a product
-    global.fetch = async (url) => {
-        const mockHtml = `
+(0, node_test_1.default)('Visual Browser Integration & Interactive Human Testing Suite', async (t) => {
+    // 1. Start a lightweight local HTTP server for real visual/browser interaction testing
+    const server = http_1.default.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`
       <!DOCTYPE html>
       <html>
         <head>
-          <title>My Cool AI Product</title>
+          <title>Replit Agent Interactive Playground</title>
         </head>
         <body>
-          <form id="login-form">
+          <h1>Visual Testing Product</h1>
+          <form id="test-form" onsubmit="event.preventDefault(); console.log('Form Submit Successful!');">
             <label for="username">Username:</label>
             <input type="text" id="username" />
-
-            <input type="password" id="password" aria-label="Enter Password" />
-
-            <button type="submit">Login</button>
+            <button type="submit" id="submit-btn">Submit Product</button>
           </form>
-          <img src="logo.png" alt="Company Logo" />
-          <img src="avatar.png" /> <!-- Missing Alt -->
-          <a href="/docs">Docs Link</a>
-          <div>Container</div>
+          <script>
+            console.log('Interactive test started!');
+            document.getElementById('submit-btn').addEventListener('click', () => {
+              console.log('Button Click Handled!');
+            });
+          </script>
         </body>
       </html>
-    `;
-        return {
-            status: 200,
-            headers: {
-                get: (name) => name === 'content-type' ? 'text/html; charset=utf-8' : null
-            },
-            text: async () => mockHtml
-        };
-    };
+    `);
+    });
+    // Listen on a random port
+    const port = await new Promise((resolve) => {
+        server.listen(0, '127.0.0.1', () => {
+            const address = server.address();
+            resolve(address.port);
+        });
+    });
+    const url = `http://127.0.0.1:${port}`;
+    let browser = null;
     try {
-        // Execute the testProduct logic block with mocked fetch
-        const url = 'http://localhost:3000';
-        const response = await fetch(url);
-        const html = await response.text();
-        const status = response.status;
-        const contentType = response.headers.get('content-type') || '';
-        const hasHtmlTag = /<html/i.test(html);
-        const hasBodyTag = /<body/i.test(html);
-        const hasDocType = /<!DOCTYPE html/i.test(html);
-        const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
-        const title = titleMatch ? titleMatch[1].trim() : 'No Title';
-        const buttonCount = (html.match(/<button/gi) || []).length;
-        const inputCount = (html.match(/<input/gi) || []).length;
-        const linkCount = (html.match(/<a\s/gi) || []).length;
-        const formCount = (html.match(/<form/gi) || []).length;
-        const divCount = (html.match(/<div/gi) || []).length;
-        const imageCount = (html.match(/<img/gi) || []).length;
-        const imagesWithAlt = (html.match(/<img[^>]+alt=/gi) || []).length;
-        const imagesMissingAlt = imageCount - imagesWithAlt;
-        const inputsWithLabel = (html.match(/<label[^>]*>|<input[^>]+aria-label=/gi) || []).length;
-        const ariaLabelsUsed = (html.match(/aria-label=|aria-labelledby=|aria-describedby=/gi) || []).length;
-        const scorePercent = imageCount === 0 ? 100 : Math.round((imagesWithAlt / imageCount) * 100);
-        // Assert page status & contentType are extracted
-        node_assert_1.default.strictEqual(status, 200);
-        node_assert_1.default.ok(contentType.includes('text/html'));
-        // Assert structure parses correctly
-        node_assert_1.default.ok(hasDocType, 'Should detect DOCTYPE');
-        node_assert_1.default.ok(hasHtmlTag, 'Should detect html tag');
-        node_assert_1.default.ok(hasBodyTag, 'Should detect body tag');
-        node_assert_1.default.strictEqual(title, 'My Cool AI Product');
-        // Assert element counts are correct
-        node_assert_1.default.strictEqual(buttonCount, 1, 'Should find 1 button');
-        node_assert_1.default.strictEqual(inputCount, 2, 'Should find 2 inputs');
-        node_assert_1.default.strictEqual(linkCount, 1, 'Should find 1 link');
-        node_assert_1.default.strictEqual(formCount, 1, 'Should find 1 form');
-        node_assert_1.default.strictEqual(divCount, 1, 'Should find 1 div');
-        // Assert accessibility audits are correct
-        node_assert_1.default.strictEqual(imageCount, 2, 'Should find 2 images');
-        node_assert_1.default.strictEqual(imagesWithAlt, 1, 'Should find 1 image with alt attribute');
-        node_assert_1.default.strictEqual(imagesMissingAlt, 1, 'Should find 1 image missing alt attribute');
-        node_assert_1.default.strictEqual(inputsWithLabel, 2, 'Should find 2 labeled/associated inputs');
-        node_assert_1.default.strictEqual(ariaLabelsUsed, 1, 'Should find 1 aria attribute');
-        node_assert_1.default.strictEqual(scorePercent, 50, 'A11y image alt score should be 50%');
+        // 2. Launch headless google-chrome
+        browser = await puppeteer_core_1.default.launch({
+            executablePath: '/usr/bin/google-chrome',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+        });
+        const page = await browser.newPage();
+        const consoleLogs = [];
+        page.on('console', (msg) => {
+            consoleLogs.push(msg.text());
+        });
+        // 3. Test Navigation & Visual Screenshot
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
+        const title = await page.title();
+        node_assert_1.default.strictEqual(title, 'Replit Agent Interactive Playground', 'Page title should match');
+        // Confirm that console logs were successfully captured
+        node_assert_1.default.ok(consoleLogs.includes('Interactive test started!'), 'Should capture load console logs');
+        const screenshotNavPath = path_1.default.resolve(process.cwd(), 'test_screenshot_navigate.png');
+        await page.screenshot({ path: screenshotNavPath });
+        // Verify screenshot file exists on disk (A11y/Visual confirmation)
+        const navScreenshotExists = await fs_1.promises.stat(screenshotNavPath).then(() => true).catch(() => false);
+        node_assert_1.default.ok(navScreenshotExists, 'Visual screenshot file should exist on disk after navigation');
+        // 4. Test Key-by-key Human-like Typing Input
+        const inputSelector = '#username';
+        await page.waitForSelector(inputSelector);
+        await page.type(inputSelector, 'Jules Engineer', { delay: 50 });
+        // Check text input value
+        const textValue = await page.$eval(inputSelector, (el) => el.value);
+        node_assert_1.default.strictEqual(textValue, 'Jules Engineer', 'Keyboard typed text should match target element value');
+        const screenshotTypePath = path_1.default.resolve(process.cwd(), 'test_screenshot_type.png');
+        await page.screenshot({ path: screenshotTypePath });
+        const typeScreenshotExists = await fs_1.promises.stat(screenshotTypePath).then(() => true).catch(() => false);
+        node_assert_1.default.ok(typeScreenshotExists, 'Visual screenshot file should exist on disk after keyboard input');
+        // 5. Test Mouse/Human Click Simulation
+        const btnSelector = '#submit-btn';
+        await page.click(btnSelector);
+        // Wait for action to register console message
+        await new Promise(r => setTimeout(r, 200));
+        // Confirm console logs capture the click
+        node_assert_1.default.ok(consoleLogs.includes('Button Click Handled!'), 'Console logs should capture human-like button click');
+        node_assert_1.default.ok(consoleLogs.includes('Form Submit Successful!'), 'Console logs should capture submit action');
+        const screenshotClickPath = path_1.default.resolve(process.cwd(), 'test_screenshot_click.png');
+        await page.screenshot({ path: screenshotClickPath });
+        const clickScreenshotExists = await fs_1.promises.stat(screenshotClickPath).then(() => true).catch(() => false);
+        node_assert_1.default.ok(clickScreenshotExists, 'Visual screenshot file should exist on disk after button click');
+        // Clean up test screenshots
+        await fs_1.promises.unlink(screenshotNavPath).catch(() => { });
+        await fs_1.promises.unlink(screenshotTypePath).catch(() => { });
+        await fs_1.promises.unlink(screenshotClickPath).catch(() => { });
     }
     finally {
-        global.fetch = originalFetch;
+        if (browser) {
+            await browser.close().catch(() => { });
+        }
+        server.close();
     }
 });

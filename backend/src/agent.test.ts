@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert'
 import path from 'path'
+import http from 'http'
 import { promises as fs } from 'fs'
+import puppeteer from 'puppeteer-core'
 import { listDirFiles, performWebSearch, execPromise } from './controllers/agentController'
-import { createAIClient, ProviderType } from './services/aiFactory'
 
 test('listDirFiles utility', async () => {
   const files = await listDirFiles(path.resolve(__dirname, '../../backend/src'), true)
@@ -23,167 +24,113 @@ test('execPromise execution utility', async () => {
   assert.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should correctly capture stdout of executed command')
 })
 
-test('GENERIC_REST custom AI client endpoint and header parsing', async (t) => {
-  // Mock global.fetch to intercept API call from GENERIC_REST client
-  const originalFetch = global.fetch
-  let fetchEndpoint = ''
-  let fetchOptions: any = null
-
-  global.fetch = async (url, options) => {
-    fetchEndpoint = url.toString()
-    fetchOptions = options
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        choices: [{ message: { content: '{"actions":[{"type":"runShell","command":"echo Success"}]}' } }]
-      })
-    } as any
-  }
-
-  try {
-    // Let's manually invoke the GENERIC_REST completion handler
-    const mockConfig = {
-      apiKey: 'test-api-key',
-      baseURL: 'https://custom-ai-endpoint.com/v2',
-      type: 'GENERIC_REST',
-      modelName: 'deepseek-coder'
-    }
-
-    // Since createAIClient connects to Prisma, we can test the GENERIC_REST completions directly:
-    const mockGenericClient = {
-      chat: {
-        completions: {
-          create: async (payload: any) => {
-            const apiBase = mockConfig.baseURL
-            const endpoint = apiBase.endsWith('/') ? `${apiBase}chat/completions` : `${apiBase}/chat/completions`
-            const response = await fetch(endpoint, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${mockConfig.apiKey}`
-              },
-              body: JSON.stringify({
-                model: payload.model || mockConfig.modelName,
-                messages: payload.messages
-              })
-            })
-            return await response.json()
-          }
-        }
-      }
-    }
-
-    const payload = {
-      messages: [{ role: 'user', content: 'test prompt' }]
-    }
-
-    const response = await mockGenericClient.chat.completions.create(payload)
-
-    // Assert endpoint structure is parsed and correct
-    assert.strictEqual(fetchEndpoint, 'https://custom-ai-endpoint.com/v2/chat/completions')
-    assert.strictEqual(fetchOptions.method, 'POST')
-    assert.strictEqual(fetchOptions.headers['Authorization'], 'Bearer test-api-key')
-    assert.strictEqual(fetchOptions.headers['Content-Type'], 'application/json')
-
-    // Assert response is parsed correctly
-    assert.ok(response.choices[0].message.content.includes('echo Success'))
-  } finally {
-    global.fetch = originalFetch
-  }
-})
-
-test('testProduct / verifyWebPage html element extraction & accessibility scoring', async () => {
-  const originalFetch = global.fetch
-
-  // Mock fetch to return a test HTML page representing a product
-  global.fetch = async (url) => {
-    const mockHtml = `
+test('Visual Browser Integration & Interactive Human Testing Suite', async (t) => {
+  // 1. Start a lightweight local HTTP server for real visual/browser interaction testing
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' })
+    res.end(`
       <!DOCTYPE html>
       <html>
         <head>
-          <title>My Cool AI Product</title>
+          <title>Replit Agent Interactive Playground</title>
         </head>
         <body>
-          <form id="login-form">
+          <h1>Visual Testing Product</h1>
+          <form id="test-form" onsubmit="event.preventDefault(); console.log('Form Submit Successful!');">
             <label for="username">Username:</label>
             <input type="text" id="username" />
-
-            <input type="password" id="password" aria-label="Enter Password" />
-
-            <button type="submit">Login</button>
+            <button type="submit" id="submit-btn">Submit Product</button>
           </form>
-          <img src="logo.png" alt="Company Logo" />
-          <img src="avatar.png" /> <!-- Missing Alt -->
-          <a href="/docs">Docs Link</a>
-          <div>Container</div>
+          <script>
+            console.log('Interactive test started!');
+            document.getElementById('submit-btn').addEventListener('click', () => {
+              console.log('Button Click Handled!');
+            });
+          </script>
         </body>
       </html>
-    `
-    return {
-      status: 200,
-      headers: {
-        get: (name: string) => name === 'content-type' ? 'text/html; charset=utf-8' : null
-      },
-      text: async () => mockHtml
-    } as any
-  }
+    `)
+  })
 
+  // Listen on a random port
+  const port = await new Promise<number>((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address() as any
+      resolve(address.port)
+    })
+  })
+
+  const url = `http://127.0.0.1:${port}`
+
+  let browser: any = null
   try {
-    // Execute the testProduct logic block with mocked fetch
-    const url = 'http://localhost:3000'
-    const response = await fetch(url)
-    const html = await response.text()
-    const status = response.status
-    const contentType = response.headers.get('content-type') || ''
+    // 2. Launch headless google-chrome
+    browser = await puppeteer.launch({
+      executablePath: '/usr/bin/google-chrome',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+    })
 
-    const hasHtmlTag = /<html/i.test(html)
-    const hasBodyTag = /<body/i.test(html)
-    const hasDocType = /<!DOCTYPE html/i.test(html)
-    const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i)
-    const title = titleMatch ? titleMatch[1].trim() : 'No Title'
+    const page = await browser.newPage()
+    const consoleLogs: string[] = []
 
-    const buttonCount = (html.match(/<button/gi) || []).length
-    const inputCount = (html.match(/<input/gi) || []).length
-    const linkCount = (html.match(/<a\s/gi) || []).length
-    const formCount = (html.match(/<form/gi) || []).length
-    const divCount = (html.match(/<div/gi) || []).length
+    page.on('console', (msg) => {
+      consoleLogs.push(msg.text())
+    })
 
-    const imageCount = (html.match(/<img/gi) || []).length
-    const imagesWithAlt = (html.match(/<img[^>]+alt=/gi) || []).length
-    const imagesMissingAlt = imageCount - imagesWithAlt
+    // 3. Test Navigation & Visual Screenshot
+    await page.goto(url, { waitUntil: 'domcontentloaded' })
+    const title = await page.title()
+    assert.strictEqual(title, 'Replit Agent Interactive Playground', 'Page title should match')
 
-    const inputsWithLabel = (html.match(/<label[^>]*>|<input[^>]+aria-label=/gi) || []).length
-    const ariaLabelsUsed = (html.match(/aria-label=|aria-labelledby=|aria-describedby=/gi) || []).length
+    // Confirm that console logs were successfully captured
+    assert.ok(consoleLogs.includes('Interactive test started!'), 'Should capture load console logs')
 
-    const scorePercent = imageCount === 0 ? 100 : Math.round((imagesWithAlt / imageCount) * 100)
+    const screenshotNavPath = path.resolve(process.cwd(), 'test_screenshot_navigate.png')
+    await page.screenshot({ path: screenshotNavPath })
 
-    // Assert page status & contentType are extracted
-    assert.strictEqual(status, 200)
-    assert.ok(contentType.includes('text/html'))
+    // Verify screenshot file exists on disk (A11y/Visual confirmation)
+    const navScreenshotExists = await fs.stat(screenshotNavPath).then(() => true).catch(() => false)
+    assert.ok(navScreenshotExists, 'Visual screenshot file should exist on disk after navigation')
 
-    // Assert structure parses correctly
-    assert.ok(hasDocType, 'Should detect DOCTYPE')
-    assert.ok(hasHtmlTag, 'Should detect html tag')
-    assert.ok(hasBodyTag, 'Should detect body tag')
-    assert.strictEqual(title, 'My Cool AI Product')
+    // 4. Test Key-by-key Human-like Typing Input
+    const inputSelector = '#username'
+    await page.waitForSelector(inputSelector)
+    await page.type(inputSelector, 'Jules Engineer', { delay: 50 })
 
-    // Assert element counts are correct
-    assert.strictEqual(buttonCount, 1, 'Should find 1 button')
-    assert.strictEqual(inputCount, 2, 'Should find 2 inputs')
-    assert.strictEqual(linkCount, 1, 'Should find 1 link')
-    assert.strictEqual(formCount, 1, 'Should find 1 form')
-    assert.strictEqual(divCount, 1, 'Should find 1 div')
+    // Check text input value
+    const textValue = await page.$eval(inputSelector, (el: any) => el.value)
+    assert.strictEqual(textValue, 'Jules Engineer', 'Keyboard typed text should match target element value')
 
-    // Assert accessibility audits are correct
-    assert.strictEqual(imageCount, 2, 'Should find 2 images')
-    assert.strictEqual(imagesWithAlt, 1, 'Should find 1 image with alt attribute')
-    assert.strictEqual(imagesMissingAlt, 1, 'Should find 1 image missing alt attribute')
-    assert.strictEqual(inputsWithLabel, 2, 'Should find 2 labeled/associated inputs')
-    assert.strictEqual(ariaLabelsUsed, 1, 'Should find 1 aria attribute')
-    assert.strictEqual(scorePercent, 50, 'A11y image alt score should be 50%')
+    const screenshotTypePath = path.resolve(process.cwd(), 'test_screenshot_type.png')
+    await page.screenshot({ path: screenshotTypePath })
+    const typeScreenshotExists = await fs.stat(screenshotTypePath).then(() => true).catch(() => false)
+    assert.ok(typeScreenshotExists, 'Visual screenshot file should exist on disk after keyboard input')
+
+    // 5. Test Mouse/Human Click Simulation
+    const btnSelector = '#submit-btn'
+    await page.click(btnSelector)
+
+    // Wait for action to register console message
+    await new Promise(r => setTimeout(r, 200))
+
+    // Confirm console logs capture the click
+    assert.ok(consoleLogs.includes('Button Click Handled!'), 'Console logs should capture human-like button click')
+    assert.ok(consoleLogs.includes('Form Submit Successful!'), 'Console logs should capture submit action')
+
+    const screenshotClickPath = path.resolve(process.cwd(), 'test_screenshot_click.png')
+    await page.screenshot({ path: screenshotClickPath })
+    const clickScreenshotExists = await fs.stat(screenshotClickPath).then(() => true).catch(() => false)
+    assert.ok(clickScreenshotExists, 'Visual screenshot file should exist on disk after button click')
+
+    // Clean up test screenshots
+    await fs.unlink(screenshotNavPath).catch(() => {})
+    await fs.unlink(screenshotTypePath).catch(() => {})
+    await fs.unlink(screenshotClickPath).catch(() => {})
 
   } finally {
-    global.fetch = originalFetch
+    if (browser) {
+      await browser.close().catch(() => {})
+    }
+    server.close()
   }
 })
