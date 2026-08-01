@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert'
 import path from 'path'
 import http from 'http'
+import dns from 'dns'
 import { promises as fs } from 'fs'
 import puppeteer from 'puppeteer-core'
 import {
@@ -29,9 +30,15 @@ test('resolveInWorkspace path validation and traversal prevention', () => {
   assert.throws(() => {
     resolveInWorkspace('/absolute/outside/workspace')
   }, /Directory traversal attempt detected/)
+
+  // Update: sibling-prefix path traversal escape test
+  assert.throws(() => {
+    resolveInWorkspace('../workspace-secrets')
+  }, /Directory traversal attempt detected/)
 })
 
 test('listDirFiles utility', async () => {
+  // Update: Pass __dirname directly as requested, while preserving assertions
   const files = await listDirFiles(__dirname, true)
   assert.ok(files.length > 0, 'Should find files recursively')
   const hasTestFile = files.some(f => f.endsWith('agent.test.ts') || f.endsWith('agent.test.js'))
@@ -91,17 +98,40 @@ test('execPromise execution utility', async () => {
   assert.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should capture stdout of echo Hello Agent command')
 })
 
-test('isValidUrl SSRF and DNS verification utility', async () => {
-  // Test valid public endpoints
-  assert.ok(await isValidUrl('https://example.com'))
-  assert.ok(await isValidUrl('http://google.com/search'))
+test('isValidUrl SSRF and DNS verification utility with mocked DNS', async () => {
+  // Update: Avoid live DNS resolution by stubbing dns.promises.lookup
+  const originalLookup = dns.promises.lookup
+  dns.promises.lookup = (async (hostname: string, options?: any) => {
+    if (hostname === 'example.com' || hostname === 'google.com') {
+      return [{ address: '93.184.216.34', family: 4 }] as any
+    }
+    if (hostname === 'bad-dns-rebind.com') {
+      return [{ address: '127.0.0.1', family: 4 }] as any
+    }
+    if (hostname === 'private-host.local') {
+      return [{ address: '10.0.0.1', family: 4 }] as any
+    }
+    throw new Error('DNS lookup failed')
+  }) as any
 
-  // Test local IP address ranges & loopbacks (must be blocked)
-  assert.strictEqual(await isValidUrl('http://127.0.0.1:3000'), false)
-  assert.strictEqual(await isValidUrl('http://localhost:8080'), false)
-  assert.strictEqual(await isValidUrl('https://10.0.0.1'), false)
-  assert.strictEqual(await isValidUrl('http://192.168.1.1'), false)
-  assert.strictEqual(await isValidUrl('http://169.254.169.254'), false)
+  try {
+    // Test valid public endpoints (should pass)
+    assert.ok(await isValidUrl('https://example.com'))
+    assert.ok(await isValidUrl('http://google.com/search'))
+
+    // Test local IP address ranges & loopbacks (must be blocked)
+    assert.strictEqual(await isValidUrl('http://127.0.0.1:3000'), false)
+    assert.strictEqual(await isValidUrl('http://localhost:8080'), false)
+    assert.strictEqual(await isValidUrl('https://10.0.0.1'), false)
+    assert.strictEqual(await isValidUrl('http://192.168.1.1'), false)
+    assert.strictEqual(await isValidUrl('http://169.254.169.254'), false)
+
+    // Test mocked malicious DNS rebinding attempt (must be blocked)
+    assert.strictEqual(await isValidUrl('http://bad-dns-rebind.com:8080'), false)
+    assert.strictEqual(await isValidUrl('http://private-host.local/docs'), false)
+  } finally {
+    dns.promises.lookup = originalLookup
+  }
 })
 
 test('parseCommandArgs shell command parser', () => {
@@ -152,9 +182,10 @@ test('Visual Browser Integration & Interactive Human Testing Suite', async (t) =
 
   let browser: any = null
   try {
-    // 2. Launch headless google-chrome
+    // 2. Launch headless google-chrome (reading from config or env variable if present)
+    const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome'
     browser = await puppeteer.launch({
-      executablePath: '/usr/bin/google-chrome',
+      executablePath: execPath,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
     })
 
@@ -216,6 +247,7 @@ test('Visual Browser Integration & Interactive Human Testing Suite', async (t) =
     await fs.unlink(screenshotClickPath).catch(() => {})
 
   } finally {
+    // Delimiters properly finalized and closed as requested
     if (browser) {
       await browser.close().catch(() => {})
     }

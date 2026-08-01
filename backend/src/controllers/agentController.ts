@@ -16,41 +16,41 @@ interface Message {
   content: string
 }
 
-/** Promisified exec with advanced timeout, buffer, and cwd configuration */
+/** Promisified exec with secure finite default timeout and 10MB maxBuffer options */
 export function execPromise(
   cmd: string,
   options: { timeout?: number; maxBuffer?: number; cwd?: string } = {}
 ): Promise<{ stdout: string; stderr: string }> {
+  const defaultOptions = { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
   return new Promise((resolve, reject) => {
-    exec(cmd, { encoding: 'utf8', ...options }, (error, stdout, stderr) => {
+    exec(cmd, { encoding: 'utf8', ...defaultOptions, ...options }, (error, stdout, stderr) => {
       if (error) {
-        return reject({
-          message: error.message,
-          stdout: stdout || '',
-          stderr: stderr || '',
-          error
-        })
+        const errInstance = new Error(error.message) as any
+        errInstance.stdout = stdout || ''
+        errInstance.stderr = stderr || ''
+        errInstance.originalError = error
+        return reject(errInstance)
       }
       resolve({ stdout: stdout || '', stderr: stderr || '' })
     })
   })
 }
 
-/** Promisified execFile */
+/** Promisified execFile with secure finite default timeout and 10MB maxBuffer options */
 export function execFilePromise(
   file: string,
   args: string[],
   options: { timeout?: number; maxBuffer?: number; cwd?: string } = {}
 ): Promise<{ stdout: string; stderr: string }> {
+  const defaultOptions = { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
   return new Promise((resolve, reject) => {
-    execFile(file, args, { encoding: 'utf8', ...options }, (error, stdout, stderr) => {
+    execFile(file, args, { encoding: 'utf8', ...defaultOptions, ...options }, (error, stdout, stderr) => {
       if (error) {
-        return reject({
-          message: error.message,
-          stdout: stdout || '',
-          stderr: stderr || '',
-          error
-        })
+        const errInstance = new Error(error.message) as any
+        errInstance.stdout = stdout || ''
+        errInstance.stderr = stderr || ''
+        errInstance.originalError = error
+        return reject(errInstance)
       }
       resolve({ stdout: stdout || '', stderr: stderr || '' })
     })
@@ -59,12 +59,12 @@ export function execFilePromise(
 
 const WORKSPACE_ROOT = process.cwd()
 
-/** Confines path resolutions strictly to the workspace root to prevent directory traversal */
+/** Confines path resolutions strictly to the workspace root using path-segment-aware relative checks */
 export function resolveInWorkspace(requestedPath: string): string {
-  // Normalize and fully resolve the path first (expands '..' and absolute directories)
   const resolved = path.resolve(WORKSPACE_ROOT, requestedPath)
-  // Ensure the resolved path remains inside the workspace root
-  if (!resolved.startsWith(WORKSPACE_ROOT)) {
+  const relative = path.relative(WORKSPACE_ROOT, resolved)
+  // Reject relative paths equal to ".." or beginning with ".." plus separator to stop traversal or sibling escapes
+  if (relative === '..' || relative.startsWith('..' + path.sep)) {
     throw new Error(`Directory traversal attempt detected: ${requestedPath}`)
   }
   return resolved
@@ -129,8 +129,24 @@ export async function performWebSearch(query: string): Promise<string> {
   }
 }
 
+/** Parses IPv4 block to long integer value for exact numeric range validation */
+export function parseIpv4ToLong(ip: string): number | null {
+  if (/^\d+$/.test(ip)) {
+    return parseInt(ip, 10)
+  }
+  const parts = ip.split('.')
+  if (parts.length !== 4) return null
+  let long = 0
+  for (let i = 0; i < 4; i++) {
+    const val = parseInt(parts[i], 10)
+    if (isNaN(val) || val < 0 || val > 255) return null
+    long = (long << 8) + val
+  }
+  return long >>> 0
+}
+
 /** Resolves hostnames via DNS and blocks SSRF / local IP address ranges */
-export async function isValidUrl(urlStr: string): Promise<boolean> {
+export async function isValidUrl(urlStr: string, allowLoopback = false): Promise<boolean> {
   try {
     const parsed = new URL(urlStr)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
@@ -150,18 +166,40 @@ export async function isValidUrl(urlStr: string): Promise<boolean> {
       }
     }
 
-    for (const ip of ipAddresses) {
-      // Loopback
-      if (ip === '127.0.0.1' || ip === '0.0.0.0' || ip === '::1') return false
-      // Private Class A, B, C, link-local
-      if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return false
-      if (ip.startsWith('172.')) {
-        const parts = ip.split('.')
-        const second = parseInt(parts[1], 10)
-        if (second >= 16 && second <= 31) return false
+    for (let ip of ipAddresses) {
+      // Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+      if (ip.startsWith('::ffff:')) {
+        ip = ip.substring(7)
       }
-      // IPv6 local addresses
-      if (ip.startsWith('fe80:') || ip.startsWith('fc00:') || ip.startsWith('fdfd:')) return false
+
+      const ipLong = parseIpv4ToLong(ip)
+      if (ipLong !== null) {
+        // Check ranges via long integer representation:
+        // 127.0.0.0/8 (127.0.0.0 to 127.255.255.255) -> 2130706432 to 2147483647
+        if (ipLong >= 2130706432 && ipLong <= 2147483647) {
+          return allowLoopback
+        }
+        // 10.0.0.0/8 (10.0.0.0 to 10.255.255.255) -> 167772160 to 184549375
+        if (ipLong >= 167772160 && ipLong <= 184549375) return false
+        // 172.16.0.0/12 (172.16.0.0 to 172.31.255.255) -> 2886729728 to 2887778303
+        if (ipLong >= 2886729728 && ipLong <= 2887778303) return false
+        // 192.168.0.0/16 (192.168.0.0 to 192.168.255.255) -> 3232235520 to 3232301055
+        if (ipLong >= 3232235520 && ipLong <= 3232301055) return false
+        // 100.64.0.0/10 (100.64.0.0 to 100.127.255.255) -> 1682046976 to 1686241279
+        if (ipLong >= 1682046976 && ipLong <= 1686241279) return false
+        // 169.254.0.0/16 (169.254.0.0 to 169.254.255.255) -> 2851995648 to 2852061183
+        if (ipLong >= 2851995648 && ipLong <= 2852061183) return false
+      } else {
+        // IPv6 validation
+        const normalizedv6 = ip.toLowerCase()
+        if (normalizedv6 === '::1' || normalizedv6 === '::') {
+          return allowLoopback
+        }
+        // Unique Local Addresses (fc00::/7)
+        if (normalizedv6.startsWith('fc') || normalizedv6.startsWith('fd')) return false
+        // Link local (fe80::/10)
+        if (normalizedv6.startsWith('fe8') || normalizedv6.startsWith('fe9') || normalizedv6.startsWith('fea') || normalizedv6.startsWith('feb')) return false
+      }
     }
     return true
   } catch {
@@ -169,13 +207,13 @@ export async function isValidUrl(urlStr: string): Promise<boolean> {
   }
 }
 
-/** Parses shell command arguments correctly while respecting quoted strings */
+/** Parses shell command arguments correctly while respecting empty/quoted strings using nullish coalescing */
 export function parseCommandArgs(command: string): string[] {
   const args: string[] = []
   const regex = /"([^"]*)"|'([^']*)'|(\S+)/g
   let match
   while ((match = regex.exec(command)) !== null) {
-    args.push(match[1] || match[2] || match[3])
+    args.push(match[1] ?? match[2] ?? match[3])
   }
   return args
 }
@@ -219,6 +257,7 @@ export async function runAgent(req: Request, res: Response) {
   let browserInstance: any = null
   let pageInstance: any = null
   const consoleLogs: string[] = []
+  let lastConsoleLogIdx = 0
 
   try {
     const provider = await resolveProviderForMode(userId, mode)
@@ -228,14 +267,33 @@ export async function runAgent(req: Request, res: Response) {
     const askModel = async (messages: Message[]): Promise<string> => {
       const cfg = getConfig()
 
-      // Trim/summarize conversation growth to stay securely within the context window
-      // Keeps the system message, initial prompt, and last 4 assistant-user turns
+      // Trim/summarize conversation growth to stay securely within the context window character budget
+      const CHARACTER_BUDGET = 30000
       let contextMessages = [...messages]
-      if (contextMessages.length > 10) {
+      let currentTotalChars = contextMessages.reduce((sum, m) => sum + m.content.length, 0)
+
+      if (currentTotalChars > CHARACTER_BUDGET) {
         const sysMsg = contextMessages[0]
-        const firstUserMsg = contextMessages[1]
-        const recentHistory = contextMessages.slice(-8)
-        contextMessages = [sysMsg, firstUserMsg, ...recentHistory]
+        const userMsg = contextMessages[1]
+        const historyMsgs = contextMessages.slice(2)
+
+        // We scan backwards keeping the newest message history first to fit inside the character budget
+        const keptHistory: Message[] = []
+        let budgetLeft = CHARACTER_BUDGET - sysMsg.content.length - userMsg.content.length
+
+        for (let i = historyMsgs.length - 1; i >= 0; i--) {
+          const msg = historyMsgs[i]
+          if (budgetLeft > 0) {
+            if (msg.content.length > budgetLeft) {
+              msg.content = msg.content.substring(0, budgetLeft) + '\n[Truncated to fit context budget...]'
+            }
+            keptHistory.unshift(msg)
+            budgetLeft -= msg.content.length
+          } else {
+            break
+          }
+        }
+        contextMessages = [sysMsg, userMsg, ...keptHistory]
       }
 
       // Send message list to appropriate client SDK
@@ -419,6 +477,11 @@ If you have completed your task, reply with:
             resultItem.status = 'success'
             resultItem.output = JSON.stringify(relativeFiles, null, 2)
           } else if (act.type === 'searchFiles') {
+            // Reject overly long or unsafe pattern sizes
+            if (act.pattern && act.pattern.length > 100) {
+              throw new Error('Search pattern exceeds secure limit of 100 characters.')
+            }
+
             const targetPath = act.path ? resolveInWorkspace(act.path) : WORKSPACE_ROOT
             const files = await listDirFiles(targetPath, true)
             const results: Array<{ path: string; line: number; text: string }> = []
@@ -432,7 +495,15 @@ If you have completed your task, reply with:
               patternRegex = new RegExp(escaped)
             }
 
+            let scannedFilesCount = 0
+            let totalMatchesFound = 0
+
             for (const f of files) {
+              scannedFilesCount++
+              if (scannedFilesCount > 100 || totalMatchesFound > 200) {
+                break
+              }
+
               try {
                 const stat = await fs.stat(f)
                 if (stat.size > 1024 * 1024) continue // Skip large files > 1MB
@@ -440,11 +511,14 @@ If you have completed your task, reply with:
                 const lines = content.split('\n')
                 lines.forEach((lineText, idx) => {
                   if (patternRegex.test(lineText)) {
-                    results.push({
-                      path: path.relative(targetPath, f),
-                      line: idx + 1,
-                      text: lineText.trim()
-                    })
+                    totalMatchesFound++
+                    if (totalMatchesFound <= 200) {
+                      results.push({
+                        path: path.relative(targetPath, f),
+                        line: idx + 1,
+                        text: lineText.trim()
+                      })
+                    }
                   }
                 })
               } catch (e) {
@@ -463,9 +537,35 @@ If you have completed your task, reply with:
             const args = parseCommandArgs(act.command)
             const program = args[0]
             const programArgs = args.slice(1)
-            const allowedPrograms = ['npm', 'node', 'npx', 'prisma', 'echo', 'ls', 'pwd', 'git', 'cat', 'grep', 'mkdir']
-            if (!allowedPrograms.includes(program)) {
-              throw new Error(`Command '${program}' is not allowed for security reasons.`)
+
+            const allowedSubcommands: Record<string, string[]> = {
+              'npm': ['install', 'run', 'test', 'build'],
+              'prisma': ['generate', 'db', 'migrate'],
+              'git': ['status', 'add', 'restore', 'log', 'diff'],
+              'echo': [],
+              'ls': [],
+              'pwd': [],
+              'cat': [],
+              'mkdir': []
+            }
+
+            if (!allowedSubcommands.hasOwnProperty(program)) {
+              throw new Error(`Program '${program}' is not allowlisted.`)
+            }
+            const allowedSubs = allowedSubcommands[program]
+            if (allowedSubs.length > 0) {
+              const sub = args[1]
+              if (!allowedSubs.includes(sub)) {
+                throw new Error(`Subcommand '${sub}' is not allowed for program '${program}'.`)
+              }
+            }
+
+            // Reject disallowed security-sensitive options starting with "-"
+            const disallowedArgsRegex = /^(-e|--eval|--exec|-c|--config)$/i
+            for (const arg of args.slice(1)) {
+              if (disallowedArgsRegex.test(arg)) {
+                throw new Error(`Disallowed security-sensitive argument pattern detected: ${arg}`)
+              }
             }
 
             const { stdout, stderr } = await execFilePromise(program, programArgs, { timeout: 15000 })
@@ -482,7 +582,7 @@ If you have completed your task, reply with:
               throw new Error(`Request blocked: Invalid or non-whitelisted URL address.`)
             }
 
-            const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
+            const response = await fetch(url, { signal: AbortSignal.timeout(5000), redirect: 'error' })
 
             const contentLengthStr = response.headers.get('content-length')
             if (contentLengthStr) {
@@ -518,7 +618,8 @@ If you have completed your task, reply with:
             resultItem.status = 'success'
             resultItem.output = cleaned.substring(0, 10000)
           } else if (act.type === 'installPackages') {
-            const npmRegex = /^@?[a-z0-9-_.]+([/@][a-z0-9-_.]+)*$/
+            // Require each package name to begin with letter, digit, or @, and reject package entries starting with "-"
+            const npmRegex = /^[a-zA-Z0-9@][a-zA-Z0-9-_.]*([/@][a-zA-Z0-9-_.]+)*$/
             const validatedNames = act.packages.filter((pkg: string) => npmRegex.test(pkg))
             if (validatedNames.length !== act.packages.length) {
               throw new Error(`Invalid package name format detected in packages.`)
@@ -544,10 +645,23 @@ If you have completed your task, reply with:
             resultItem.status = 'success'
             resultItem.output = JSON.stringify(osInfo, null, 2)
           } else if (act.type === 'browserNavigate') {
+            // Validate URL before navigating: permit http/https schemes, loopbacks only for local preview
+            const url = act.url
+            const valid = await isValidUrl(url, true) // allow loopback for local-previews
+            if (!valid) {
+              throw new Error(`Request blocked: Invalid or non-whitelisted URL address.`)
+            }
+
             // Setup Chromium browser instance if it is not already running
             if (!browserInstance) {
+              const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome'
+              const pathExists = await fs.stat(execPath).then(() => true).catch(() => false)
+              if (!pathExists) {
+                throw new Error(`Puppeteer executable not found at specified path: ${execPath}`)
+              }
+
               browserInstance = await puppeteer.launch({
-                executablePath: '/usr/bin/google-chrome',
+                executablePath: execPath,
                 args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
               })
               pageInstance = await browserInstance.newPage()
@@ -560,19 +674,23 @@ If you have completed your task, reply with:
               })
             }
 
-            const url = act.url
             await pageInstance.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
-            // Capture a high-resolution screenshot
-            const screenshotPath = path.resolve(process.cwd(), 'screenshot_navigate.png')
+            // Generate unique screenshot filename securely under resolveInWorkspace
+            const filename = `screenshot_${Date.now()}_navigate.png`
+            const screenshotPath = resolveInWorkspace(filename)
             await pageInstance.screenshot({ path: screenshotPath, fullPage: true })
+
+            // Serialize console logs added since the prior action, bounding log maximum to 100 entries
+            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100)
+            lastConsoleLogIdx = consoleLogs.length
 
             const pageTitle = await pageInstance.title()
             const auditReport = {
               title: pageTitle,
               url,
               screenshot: screenshotPath,
-              consoleLogs: consoleLogs,
+              consoleLogs: logsSegment,
               status: 'success'
             }
 
@@ -590,13 +708,19 @@ If you have completed your task, reply with:
             // Wait for visual transitions/loads
             await new Promise(r => setTimeout(r, 1000))
 
-            const screenshotPath = path.resolve(process.cwd(), 'screenshot_click.png')
+            // Generate unique screenshot filename securely under resolveInWorkspace
+            const filename = `screenshot_${Date.now()}_click.png`
+            const screenshotPath = resolveInWorkspace(filename)
             await pageInstance.screenshot({ path: screenshotPath, fullPage: true })
+
+            // Serialize console logs added since the prior action, bounding log maximum to 100 entries
+            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100)
+            lastConsoleLogIdx = consoleLogs.length
 
             const auditReport = {
               selector,
               screenshot: screenshotPath,
-              consoleLogs: consoleLogs,
+              consoleLogs: logsSegment,
               status: 'success'
             }
 
@@ -621,14 +745,20 @@ If you have completed your task, reply with:
             // Wait for actions to register
             await new Promise(r => setTimeout(r, 500))
 
-            const screenshotPath = path.resolve(process.cwd(), 'screenshot_type.png')
+            // Generate unique screenshot filename securely under resolveInWorkspace
+            const filename = `screenshot_${Date.now()}_type.png`
+            const screenshotPath = resolveInWorkspace(filename)
             await pageInstance.screenshot({ path: screenshotPath, fullPage: true })
+
+            // Serialize console logs added since the prior action, bounding log maximum to 100 entries
+            const logsSegment = consoleLogs.slice(lastConsoleLogIdx, 100)
+            lastConsoleLogIdx = consoleLogs.length
 
             const auditReport = {
               selector,
               text,
               screenshot: screenshotPath,
-              consoleLogs: consoleLogs,
+              consoleLogs: logsSegment,
               status: 'success'
             }
 
