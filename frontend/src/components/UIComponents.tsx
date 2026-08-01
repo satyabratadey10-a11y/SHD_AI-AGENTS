@@ -226,7 +226,7 @@ export const AIProviders: React.FC = () => {
                 value={form.apiKey}
                 onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
                 required
-                autoComplete="new-password"
+                autoComplete="off"
               />
             </label>
             <br />
