@@ -1,9 +1,10 @@
 import { Request, Response } from 'express'
 import { createAIClient, ProviderType } from '../services/aiFactory'
-import { exec } from 'child_process'
+import { exec, execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import path from 'path'
 import os from 'os'
+import dns from 'dns'
 import { PrismaClient } from '@prisma/client'
 import puppeteer from 'puppeteer-core'
 
@@ -15,24 +16,67 @@ interface Message {
   content: string
 }
 
-/** Promisified exec */
-export function execPromise(cmd: string): Promise<{ stdout: string; stderr: string }> {
+/** Promisified exec with advanced timeout, buffer, and cwd configuration */
+export function execPromise(
+  cmd: string,
+  options: { timeout?: number; maxBuffer?: number; cwd?: string } = {}
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    exec(cmd, { encoding: 'utf8' }, (error, stdout, stderr) => {
+    exec(cmd, { encoding: 'utf8', ...options }, (error, stdout, stderr) => {
       if (error) {
-        return reject(new Error(stderr || error.message))
+        return reject({
+          message: error.message,
+          stdout: stdout || '',
+          stderr: stderr || '',
+          error
+        })
       }
-      resolve({ stdout, stderr })
+      resolve({ stdout: stdout || '', stderr: stderr || '' })
     })
   })
 }
 
-/** Recursive directory listing helper */
+/** Promisified execFile */
+export function execFilePromise(
+  file: string,
+  args: string[],
+  options: { timeout?: number; maxBuffer?: number; cwd?: string } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { encoding: 'utf8', ...options }, (error, stdout, stderr) => {
+      if (error) {
+        return reject({
+          message: error.message,
+          stdout: stdout || '',
+          stderr: stderr || '',
+          error
+        })
+      }
+      resolve({ stdout: stdout || '', stderr: stderr || '' })
+    })
+  })
+}
+
+const WORKSPACE_ROOT = process.cwd()
+
+/** Confines path resolutions strictly to the workspace root to prevent directory traversal */
+export function resolveInWorkspace(requestedPath: string): string {
+  // Normalize and fully resolve the path first (expands '..' and absolute directories)
+  const resolved = path.resolve(WORKSPACE_ROOT, requestedPath)
+  // Ensure the resolved path remains inside the workspace root
+  if (!resolved.startsWith(WORKSPACE_ROOT)) {
+    throw new Error(`Directory traversal attempt detected: ${requestedPath}`)
+  }
+  return resolved
+}
+
+/** Recursive directory listing helper confined to the workspace */
 export async function listDirFiles(dir: string, recursive = true): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true })
+  const resolvedDir = resolveInWorkspace(dir)
+  const entries = await fs.readdir(resolvedDir, { withFileTypes: true })
   const files = await Promise.all(
     entries.map(async (entry) => {
-      const res = path.resolve(dir, entry.name)
+      const res = path.resolve(resolvedDir, entry.name)
       if (entry.isDirectory()) {
         // Skip common ignore patterns to be efficient and secure
         if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === '.next') {
@@ -47,30 +91,31 @@ export async function listDirFiles(dir: string, recursive = true): Promise<strin
   return files.flat().filter(Boolean)
 }
 
-/** DuckDuckGo HTML Search Scraper with Mock Fallback */
+/** DuckDuckGo HTML Search Scraper with strict timeout and no backtracking regexes */
 export async function performWebSearch(query: string): Promise<string> {
   try {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
     const res = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-      }
+      },
+      signal: AbortSignal.timeout(5000)
     })
     if (!res.ok) throw new Error(`DuckDuckGo returned status ${res.status}`)
     const html = await res.text()
 
-    // Scrape snippets
+    // Scrape snippets using non-backtracking regexes
     const snippets: string[] = []
-    const snippetMatches = html.matchAll(/<a class="result__snippet"[\s\S]*?>([\s\S]*?)<\/a>/g)
+    const snippetMatches = html.matchAll(/<a class="result__snippet"[^>]*>([^<]*)<\/a>/g)
     for (const match of snippetMatches) {
-      const text = match[1].replace(/<[^>]+>/g, '').trim()
+      const text = match[1].trim()
       if (text) snippets.push(text)
     }
 
     const titles: string[] = []
-    const titleMatches = html.matchAll(/<a class="result__url"[\s\S]*?>([\s\S]*?)<\/a>/g)
+    const titleMatches = html.matchAll(/<a class="result__url"[^>]*>([^<]*)<\/a>/g)
     for (const match of titleMatches) {
-      const text = match[1].replace(/<[^>]+>/g, '').trim()
+      const text = match[1].trim()
       if (text) titles.push(text)
     }
 
@@ -79,18 +124,66 @@ export async function performWebSearch(query: string): Promise<string> {
     }
     return `Search for "${query}" completed, but could not parse search result snippets.`
   } catch (err: any) {
-    // Return high-quality simulated search results matching the query
-    return `Simulated Web Search Results for "${query}":\n` +
-      `1. Replit Agent Documentation & Usage - Guidelines on tool usage, automatic environment configuration, and agent tasks.\n` +
-      `2. Best practices for building coding assistants - Utilizing file reads, shell commands, package managers, and self-correction loops.\n` +
-      `3. Advanced TypeScript & Node.js development patterns - Structuring scalable express servers, backend configurations, and DB queries.`
+    console.error('Web search failed:', err)
+    return `Error: Web search could not be completed. Details: ${err.message || err}`
   }
+}
+
+/** Resolves hostnames via DNS and blocks SSRF / local IP address ranges */
+export async function isValidUrl(urlStr: string): Promise<boolean> {
+  try {
+    const parsed = new URL(urlStr)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    const hostname = parsed.hostname.toLowerCase()
+
+    // If it's already an IP address, check it. If it's a hostname, resolve it via DNS first.
+    let ipAddresses: string[] = []
+    if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
+      ipAddresses.push(hostname)
+    } else {
+      try {
+        const lookup = await dns.promises.lookup(hostname, { all: true })
+        ipAddresses = lookup.map(addr => addr.address)
+      } catch {
+        // DNS lookup failure: reject to remain secure
+        return false
+      }
+    }
+
+    for (const ip of ipAddresses) {
+      // Loopback
+      if (ip === '127.0.0.1' || ip === '0.0.0.0' || ip === '::1') return false
+      // Private Class A, B, C, link-local
+      if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return false
+      if (ip.startsWith('172.')) {
+        const parts = ip.split('.')
+        const second = parseInt(parts[1], 10)
+        if (second >= 16 && second <= 31) return false
+      }
+      // IPv6 local addresses
+      if (ip.startsWith('fe80:') || ip.startsWith('fc00:') || ip.startsWith('fdfd:')) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Parses shell command arguments correctly while respecting quoted strings */
+export function parseCommandArgs(command: string): string[] {
+  const args: string[] = []
+  const regex = /"([^"]*)"|'([^']*)'|(\S+)/g
+  let match
+  while ((match = regex.exec(command)) !== null) {
+    args.push(match[1] || match[2] || match[3])
+  }
+  return args
 }
 
 /**
  * Runs an autonomous agent loop (Replit Agent standard).
  *
- * Supports the following 16 Replit Agent tool/function callings:
+ * Supports the following 15 Replit Agent tool/function callings:
  * - readFile: Reads file contents.
  * - writeFile: Writes file contents.
  * - patchFile: Rewrites only specific blocks of code (search and replace).
@@ -101,14 +194,11 @@ export async function performWebSearch(query: string): Promise<string> {
  * - runShell: Runs backend CLI/shell commands.
  * - webSearch: Scrapes DuckDuckGo for info.
  * - fetchUrl: Retrives page contents for web documentation.
- * - dbQuery: Directly queries Postgres database via Prisma.
  * - installPackages: Installs packages using NPM.
  * - getServiceStatus: Collects OS & workspace process details.
  * - browserNavigate: Launches a headless browser, opens any local or remote URL, captures real-time console logs, and saves a visual screenshot of the rendered app.
  * - browserInteractClick: Simulates a real human clicking on a specified selector or text, updating the browser state and saving a post-click visual screenshot.
  * - browserInteractType: Simulates a real human keyboard typing text into an input field key-by-key, triggering all browser change events, and saving a post-typing visual screenshot.
- *
- * Tool execution feedback is passed directly to the model in subsequent turns.
  */
 export async function runAgent(req: Request, res: Response) {
   const { prompt, mode, userId } = req.body as {
@@ -119,6 +209,11 @@ export async function runAgent(req: Request, res: Response) {
 
   if (!prompt || !mode || !userId) {
     return res.status(400).json({ error: 'Missing prompt, mode or userId' })
+  }
+
+  const allowedModes = ['lite', 'economy', 'power', 'turbo']
+  if (!allowedModes.includes(mode)) {
+    return res.status(400).json({ error: `Invalid mode value: ${mode}` })
   }
 
   let browserInstance: any = null
@@ -133,20 +228,30 @@ export async function runAgent(req: Request, res: Response) {
     const askModel = async (messages: Message[]): Promise<string> => {
       const cfg = getConfig()
 
+      // Trim/summarize conversation growth to stay securely within the context window
+      // Keeps the system message, initial prompt, and last 4 assistant-user turns
+      let contextMessages = [...messages]
+      if (contextMessages.length > 10) {
+        const sysMsg = contextMessages[0]
+        const firstUserMsg = contextMessages[1]
+        const recentHistory = contextMessages.slice(-8)
+        contextMessages = [sysMsg, firstUserMsg, ...recentHistory]
+      }
+
       // Send message list to appropriate client SDK
       if (type === ProviderType.OPENAI || type === ProviderType.GENERIC_REST) {
         const response = await (client as any).chat.completions.create({
           model: cfg.modelName,
-          messages,
+          messages: contextMessages,
           max_tokens: cfg.maxTokens,
           temperature: cfg.temperature
         })
         return response.choices[0].message.content
       } else if (type === ProviderType.ANTHROPIC) {
         // Extract system prompt from the first message if present
-        const sysMsg = messages.find(m => m.role === 'system')
+        const sysMsg = contextMessages.find(m => m.role === 'system')
         const systemPrompt = sysMsg ? sysMsg.content : undefined
-        const filteredMessages = messages.filter(m => m.role !== 'system')
+        const filteredMessages = contextMessages.filter(m => m.role !== 'system')
 
         const response = await (client as any).messages.create({
           model: cfg.modelName,
@@ -158,7 +263,7 @@ export async function runAgent(req: Request, res: Response) {
         return response.content[0].text
       } else {
         // Fallback REST caller
-        const resp = await (client as any).chat({ messages, max_tokens: cfg.maxTokens })
+        const resp = await (client as any).chat({ messages: contextMessages, max_tokens: cfg.maxTokens })
         return resp.choices[0].message.content
       }
     }
@@ -171,7 +276,7 @@ Do not include conversational filler outside of the JSON block. Your responses s
 
 If you are finished with the task, specify "done": true and include a "finalMessage" summarizing your accomplishments.
 
-Here are the 16 tools you can use by including them in the "actions" array:
+Here are the 15 tools you can use by including them in the "actions" array:
 1. { "type": "readFile", "path": string } -> Returns file content.
 2. { "type": "writeFile", "path": string, "content": string } -> Overwrites/writes file.
 3. { "type": "patchFile", "path": string, "search": string, "replace": string } -> Replaces search string with replace string in path.
@@ -182,12 +287,11 @@ Here are the 16 tools you can use by including them in the "actions" array:
 8. { "type": "runShell", "command": string } -> Runs bash/shell command.
 9. { "type": "webSearch", "query": string } -> Searches the web.
 10. { "type": "fetchUrl", "url": string } -> Fetches webpage contents as text.
-11. { "type": "dbQuery", "query": string } -> Runs SQL commands on the database.
-12. { "type": "installPackages", "packages": string[] } -> Installs NPM packages.
-13. { "type": "getServiceStatus" } -> Gets OS & system environments.
-14. { "type": "browserNavigate", "url": string } -> Opens a headless Chrome browser, navigates to the URL, listens to console logs, and saves a full-page screenshot.
-15. { "type": "browserInteractClick", "selector": string } -> Clicks on an HTML selector on the active browser page like a real human, and captures an updated screenshot.
-16. { "type": "browserInteractType", "selector": string, "text": string } -> Inputs text key-by-key like a real keyboard into the active browser page selector, and captures an updated screenshot.
+11. { "type": "installPackages", "packages": string[] } -> Installs NPM packages.
+12. { "type": "getServiceStatus" } -> Gets OS & system environments.
+13. { "type": "browserNavigate", "url": string } -> Opens a headless Chrome browser, navigates to the URL, listens to console logs, and saves a full-page screenshot.
+14. { "type": "browserInteractClick", "selector": string } -> Clicks on an HTML selector on the active browser page like a real human, and captures an updated screenshot.
+15. { "type": "browserInteractType", "selector": string, "text": string } -> Inputs text key-by-key like a real keyboard into the active browser page selector, and captures an updated screenshot.
 
 Example response:
 {
@@ -220,12 +324,11 @@ If you have completed your task, reply with:
 
       let parsed: any
       try {
-        // Strip out code block markdown if present
         let cleanedJson = rawResponse.trim()
-        if (cleanedJson.startsWith('```json')) {
-          cleanedJson = cleanedJson.substring(7, cleanedJson.length - 3).trim()
-        } else if (cleanedJson.startsWith('```')) {
-          cleanedJson = cleanedJson.substring(3, cleanedJson.length - 3).trim()
+        const fenceRegex = /```(?:json)?\s*([\s\S]*?)(?:```|$)/i
+        const match = cleanedJson.match(fenceRegex)
+        if (match) {
+          cleanedJson = match[1].trim()
         }
         parsed = JSON.parse(cleanedJson)
       } catch (e) {
@@ -236,9 +339,15 @@ If you have completed your task, reply with:
         continue
       }
 
+      // Filtered history that removes system messages and raw tool results before returning to client
+      const filteredHistory = messages.filter(m =>
+        m.role !== 'system' &&
+        !(m.role === 'user' && m.content.startsWith('Executed '))
+      )
+
       // 1. Check for clarifying questions
       if (parsed.question) {
-        return res.json({ question: parsed.question, history: messages })
+        return res.json({ question: parsed.question, history: filteredHistory })
       }
 
       // 2. Check for completion
@@ -247,7 +356,7 @@ If you have completed your task, reply with:
           success: true,
           done: true,
           finalMessage: parsed.finalMessage || 'Task completed successfully!',
-          history: messages,
+          history: filteredHistory,
           executedActions: executedActionsList
         })
       }
@@ -257,7 +366,7 @@ If you have completed your task, reply with:
         return res.json({
           success: true,
           result: 'No actions required, loop completed.',
-          history: messages,
+          history: filteredHistory,
           executedActions: executedActionsList
         })
       }
@@ -265,21 +374,26 @@ If you have completed your task, reply with:
       // 3. Execute actions in order and capture outputs
       const actionResults: any[] = []
       for (const act of actions) {
-        const resultItem: any = { type: act.type, path: act.path || act.command || act.query || act.url || act.selector || '' }
+        const resultItem: any = { type: act.type, path: act.path || act.selector || '' }
         try {
           if (act.type === 'readFile') {
-            const absolutePath = path.resolve(act.path)
-            const content = await fs.readFile(absolutePath, 'utf8')
+            const absolutePath = resolveInWorkspace(act.path)
+            let content = await fs.readFile(absolutePath, 'utf8')
+
+            // Context Budget constraints: Truncate output to prevent context bloating
+            if (content.length > 5000) {
+              content = content.substring(0, 5000) + '\n[Output truncated due to context size limit...]'
+            }
             resultItem.status = 'success'
             resultItem.output = content
           } else if (act.type === 'writeFile') {
-            const absolutePath = path.resolve(act.path)
+            const absolutePath = resolveInWorkspace(act.path)
             await fs.mkdir(path.dirname(absolutePath), { recursive: true })
             await fs.writeFile(absolutePath, act.content, 'utf8')
             resultItem.status = 'success'
             resultItem.output = 'File written successfully.'
           } else if (act.type === 'patchFile') {
-            const absolutePath = path.resolve(act.path)
+            const absolutePath = resolveInWorkspace(act.path)
             const content = await fs.readFile(absolutePath, 'utf8')
             if (!content.includes(act.search)) {
               throw new Error(`Search block not found in file: ${act.path}`)
@@ -289,25 +403,35 @@ If you have completed your task, reply with:
             resultItem.status = 'success'
             resultItem.output = 'File patched successfully.'
           } else if (act.type === 'deleteFile') {
-            const absolutePath = path.resolve(act.path)
+            const absolutePath = resolveInWorkspace(act.path)
             await fs.unlink(absolutePath)
             resultItem.status = 'success'
             resultItem.output = 'File deleted successfully.'
           } else if (act.type === 'makeDirectory') {
-            const absolutePath = path.resolve(act.path)
+            const absolutePath = resolveInWorkspace(act.path)
             await fs.mkdir(absolutePath, { recursive: true })
             resultItem.status = 'success'
             resultItem.output = 'Directory created successfully.'
           } else if (act.type === 'listFiles') {
-            const targetPath = act.path ? path.resolve(act.path) : process.cwd()
+            const targetPath = act.path ? resolveInWorkspace(act.path) : WORKSPACE_ROOT
             const allFiles = await listDirFiles(targetPath, act.recursive !== false)
             const relativeFiles = allFiles.map(f => path.relative(targetPath, f))
             resultItem.status = 'success'
             resultItem.output = JSON.stringify(relativeFiles, null, 2)
           } else if (act.type === 'searchFiles') {
-            const targetPath = act.path ? path.resolve(act.path) : process.cwd()
+            const targetPath = act.path ? resolveInWorkspace(act.path) : WORKSPACE_ROOT
             const files = await listDirFiles(targetPath, true)
             const results: Array<{ path: string; line: number; text: string }> = []
+
+            // Construct RegExp with guarded error handling
+            let patternRegex: RegExp
+            try {
+              patternRegex = new RegExp(act.pattern)
+            } catch (err: any) {
+              const escaped = act.pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
+              patternRegex = new RegExp(escaped)
+            }
+
             for (const f of files) {
               try {
                 const stat = await fs.stat(f)
@@ -315,7 +439,7 @@ If you have completed your task, reply with:
                 const content = await fs.readFile(f, 'utf8')
                 const lines = content.split('\n')
                 lines.forEach((lineText, idx) => {
-                  if (lineText.includes(act.pattern)) {
+                  if (patternRegex.test(lineText)) {
                     results.push({
                       path: path.relative(targetPath, f),
                       line: idx + 1,
@@ -327,10 +451,24 @@ If you have completed your task, reply with:
                 // Ignore read errors
               }
             }
+
+            let outputStr = JSON.stringify(results, null, 2)
+            if (outputStr.length > 5000) {
+              outputStr = outputStr.substring(0, 5000) + '\n[Output truncated due to context size limit...]'
+            }
+
             resultItem.status = 'success'
-            resultItem.output = JSON.stringify(results, null, 2)
+            resultItem.output = outputStr
           } else if (act.type === 'runShell') {
-            const { stdout, stderr } = await execPromise(act.command)
+            const args = parseCommandArgs(act.command)
+            const program = args[0]
+            const programArgs = args.slice(1)
+            const allowedPrograms = ['npm', 'node', 'npx', 'prisma', 'echo', 'ls', 'pwd', 'git', 'cat', 'grep', 'mkdir']
+            if (!allowedPrograms.includes(program)) {
+              throw new Error(`Command '${program}' is not allowed for security reasons.`)
+            }
+
+            const { stdout, stderr } = await execFilePromise(program, programArgs, { timeout: 15000 })
             resultItem.status = 'success'
             resultItem.output = `Stdout:\n${stdout}\nStderr:\n${stderr}`
           } else if (act.type === 'webSearch') {
@@ -338,24 +476,55 @@ If you have completed your task, reply with:
             resultItem.status = 'success'
             resultItem.output = searchOutput
           } else if (act.type === 'fetchUrl') {
-            const response = await fetch(act.url)
-            const text = await response.text()
+            const url = act.url
+            const valid = await isValidUrl(url)
+            if (!valid) {
+              throw new Error(`Request blocked: Invalid or non-whitelisted URL address.`)
+            }
+
+            const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
+
+            const contentLengthStr = response.headers.get('content-length')
+            if (contentLengthStr) {
+              const cl = parseInt(contentLengthStr, 10)
+              if (cl > 5 * 1024 * 1024) {
+                throw new Error('Response Content-Length exceeds the 5MB limit.')
+              }
+            }
+
+            // Stream and limit response consumption so response.text() cannot buffer unbounded payload
+            let bodyText = ''
+            if (response.body && typeof (response.body as any)[Symbol.asyncIterator] === 'function') {
+              let totalBytes = 0
+              for await (const chunk of response.body as any) {
+                bodyText += chunk.toString()
+                totalBytes += chunk.length
+                if (totalBytes > 500000) { // cap at 500KB
+                  break
+                }
+              }
+            } else {
+              bodyText = await response.text()
+            }
+
             // Clean up heavy tags
-            const cleaned = text
+            const cleaned = bodyText
               .replace(/<script[\s\S]*?<\/script>/gi, '')
               .replace(/<style[\s\S]*?<\/style>/gi, '')
               .replace(/<[^>]+>/g, ' ')
               .replace(/\s+/g, ' ')
               .trim()
+
             resultItem.status = 'success'
             resultItem.output = cleaned.substring(0, 10000)
-          } else if (act.type === 'dbQuery') {
-            const dbResult = await prisma.$queryRawUnsafe(act.query)
-            resultItem.status = 'success'
-            resultItem.output = JSON.stringify(dbResult, null, 2)
           } else if (act.type === 'installPackages') {
-            const installCommand = `npm install ${act.packages.join(' ')}`
-            const { stdout, stderr } = await execPromise(installCommand)
+            const npmRegex = /^@?[a-z0-9-_.]+([/@][a-z0-9-_.]+)*$/
+            const validatedNames = act.packages.filter((pkg: string) => npmRegex.test(pkg))
+            if (validatedNames.length !== act.packages.length) {
+              throw new Error(`Invalid package name format detected in packages.`)
+            }
+
+            const { stdout, stderr } = await execFilePromise('npm', ['install', ...validatedNames], { timeout: 60000 })
             resultItem.status = 'success'
             resultItem.output = `Stdout:\n${stdout}\nStderr:\n${stderr}`
           } else if (act.type === 'getServiceStatus') {
@@ -484,10 +653,16 @@ If you have completed your task, reply with:
       })
     }
 
+    // Filtered history that removes system messages and raw tool results before returning to client
+    const filteredHistory = messages.filter(m =>
+      m.role !== 'system' &&
+      !(m.role === 'user' && m.content.startsWith('Executed '))
+    )
+
     // Exhausted iterations without success.
     return res.status(500).json({
       error: 'Agent failed to converge after maximum retries.',
-      history: messages,
+      history: filteredHistory,
       executedActions: executedActionsList
     })
   } catch (err: any) {

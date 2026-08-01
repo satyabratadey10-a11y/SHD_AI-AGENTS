@@ -10,20 +10,90 @@ const http_1 = __importDefault(require("http"));
 const fs_1 = require("fs");
 const puppeteer_core_1 = __importDefault(require("puppeteer-core"));
 const agentController_1 = require("./controllers/agentController");
-(0, node_test_1.default)('listDirFiles utility', async () => {
-    const files = await (0, agentController_1.listDirFiles)(path_1.default.resolve(__dirname, '../../backend/src'), true);
-    node_assert_1.default.ok(files.length > 0, 'Should find files in backend/src');
-    const hasServerTs = files.some(f => f.endsWith('server.ts'));
-    node_assert_1.default.ok(hasServerTs, 'Should find server.ts in the listing');
+(0, node_test_1.default)('resolveInWorkspace path validation and traversal prevention', () => {
+    // Safe paths
+    const safePath1 = (0, agentController_1.resolveInWorkspace)('src/server.ts');
+    node_assert_1.default.ok(safePath1.endsWith('src/server.ts'));
+    const safePath2 = (0, agentController_1.resolveInWorkspace)('./package.json');
+    node_assert_1.default.ok(safePath2.endsWith('package.json'));
+    // Directory traversal attempts (must throw)
+    node_assert_1.default.throws(() => {
+        (0, agentController_1.resolveInWorkspace)('../../../etc/passwd');
+    }, /Directory traversal attempt detected/);
+    node_assert_1.default.throws(() => {
+        (0, agentController_1.resolveInWorkspace)('/absolute/outside/workspace');
+    }, /Directory traversal attempt detected/);
 });
-(0, node_test_1.default)('performWebSearch utility', async () => {
-    const output = await (0, agentController_1.performWebSearch)('TypeScript');
-    node_assert_1.default.ok(output && typeof output === 'string', 'Should return a string output');
-    node_assert_1.default.ok(output.includes('TypeScript') || output.includes('Results for'), 'Output should contain relevant search topics');
+(0, node_test_1.default)('listDirFiles utility', async () => {
+    const files = await (0, agentController_1.listDirFiles)(__dirname, true);
+    node_assert_1.default.ok(files.length > 0, 'Should find files recursively');
+    const hasTestFile = files.some(f => f.endsWith('agent.test.ts') || f.endsWith('agent.test.js'));
+    node_assert_1.default.ok(hasTestFile, 'Should find this test file in the listing');
+});
+(0, node_test_1.default)('performWebSearch utility with stubbed fetch (success)', async () => {
+    const originalFetch = global.fetch;
+    // Stub global.fetch with deterministic DuckDuckGo HTML
+    global.fetch = async (url) => {
+        return {
+            ok: true,
+            status: 200,
+            text: async () => `
+        <html>
+          <body>
+            <a class="result__snippet" href="/r1">Retrieval evidence snippet text.</a>
+            <a class="result__url" href="/r1">https://example.com/topic</a>
+          </body>
+        </html>
+      `
+        };
+    };
+    try {
+        const output = await (0, agentController_1.performWebSearch)('TypeScript');
+        node_assert_1.default.ok(output.includes('Retrieval evidence snippet text.'), 'Parsed search output should contain stubbed snippet text');
+        node_assert_1.default.ok(output.includes('https://example.com/topic'), 'Parsed search output should contain stubbed title');
+    }
+    finally {
+        global.fetch = originalFetch;
+    }
+});
+(0, node_test_1.default)('performWebSearch utility (failure branch)', async () => {
+    const originalFetch = global.fetch;
+    // Stub global.fetch to simulate a failure
+    global.fetch = async (url) => {
+        return {
+            ok: false,
+            status: 500,
+            text: async () => 'Internal Server Error'
+        };
+    };
+    try {
+        const output = await (0, agentController_1.performWebSearch)('TypeScript');
+        node_assert_1.default.ok(output.includes('Error: Web search could not be completed'), 'Failure branch should indicate web search could not be completed');
+    }
+    finally {
+        global.fetch = originalFetch;
+    }
 });
 (0, node_test_1.default)('execPromise execution utility', async () => {
-    const result = await (0, agentController_1.execPromise)('echo "Hello Agent"');
-    node_assert_1.default.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should correctly capture stdout of executed command');
+    const result = await (0, agentController_1.execPromise)('echo Hello Agent');
+    node_assert_1.default.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should capture stdout of echo Hello Agent command');
+});
+(0, node_test_1.default)('isValidUrl SSRF and DNS verification utility', async () => {
+    // Test valid public endpoints
+    node_assert_1.default.ok(await (0, agentController_1.isValidUrl)('https://example.com'));
+    node_assert_1.default.ok(await (0, agentController_1.isValidUrl)('http://google.com/search'));
+    // Test local IP address ranges & loopbacks (must be blocked)
+    node_assert_1.default.strictEqual(await (0, agentController_1.isValidUrl)('http://127.0.0.1:3000'), false);
+    node_assert_1.default.strictEqual(await (0, agentController_1.isValidUrl)('http://localhost:8080'), false);
+    node_assert_1.default.strictEqual(await (0, agentController_1.isValidUrl)('https://10.0.0.1'), false);
+    node_assert_1.default.strictEqual(await (0, agentController_1.isValidUrl)('http://192.168.1.1'), false);
+    node_assert_1.default.strictEqual(await (0, agentController_1.isValidUrl)('http://169.254.169.254'), false);
+});
+(0, node_test_1.default)('parseCommandArgs shell command parser', () => {
+    const args = (0, agentController_1.parseCommandArgs)('git commit -m "feat: complete visual testing"');
+    node_assert_1.default.deepStrictEqual(args, ['git', 'commit', '-m', 'feat: complete visual testing']);
+    const argsSimple = (0, agentController_1.parseCommandArgs)('ls -la src/controllers');
+    node_assert_1.default.deepStrictEqual(argsSimple, ['ls', '-la', 'src/controllers']);
 });
 (0, node_test_1.default)('Visual Browser Integration & Interactive Human Testing Suite', async (t) => {
     // 1. Start a lightweight local HTTP server for real visual/browser interaction testing

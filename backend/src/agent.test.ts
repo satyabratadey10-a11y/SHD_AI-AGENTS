@@ -4,24 +4,112 @@ import path from 'path'
 import http from 'http'
 import { promises as fs } from 'fs'
 import puppeteer from 'puppeteer-core'
-import { listDirFiles, performWebSearch, execPromise } from './controllers/agentController'
+import {
+  listDirFiles,
+  performWebSearch,
+  execPromise,
+  isValidUrl,
+  resolveInWorkspace,
+  parseCommandArgs
+} from './controllers/agentController'
 
-test('listDirFiles utility', async () => {
-  const files = await listDirFiles(path.resolve(__dirname, '../../backend/src'), true)
-  assert.ok(files.length > 0, 'Should find files in backend/src')
-  const hasServerTs = files.some(f => f.endsWith('server.ts'))
-  assert.ok(hasServerTs, 'Should find server.ts in the listing')
+test('resolveInWorkspace path validation and traversal prevention', () => {
+  // Safe paths
+  const safePath1 = resolveInWorkspace('src/server.ts')
+  assert.ok(safePath1.endsWith('src/server.ts'))
+
+  const safePath2 = resolveInWorkspace('./package.json')
+  assert.ok(safePath2.endsWith('package.json'))
+
+  // Directory traversal attempts (must throw)
+  assert.throws(() => {
+    resolveInWorkspace('../../../etc/passwd')
+  }, /Directory traversal attempt detected/)
+
+  assert.throws(() => {
+    resolveInWorkspace('/absolute/outside/workspace')
+  }, /Directory traversal attempt detected/)
 })
 
-test('performWebSearch utility', async () => {
-  const output = await performWebSearch('TypeScript')
-  assert.ok(output && typeof output === 'string', 'Should return a string output')
-  assert.ok(output.includes('TypeScript') || output.includes('Results for'), 'Output should contain relevant search topics')
+test('listDirFiles utility', async () => {
+  const files = await listDirFiles(__dirname, true)
+  assert.ok(files.length > 0, 'Should find files recursively')
+  const hasTestFile = files.some(f => f.endsWith('agent.test.ts') || f.endsWith('agent.test.js'))
+  assert.ok(hasTestFile, 'Should find this test file in the listing')
+})
+
+test('performWebSearch utility with stubbed fetch (success)', async () => {
+  const originalFetch = global.fetch
+
+  // Stub global.fetch with deterministic DuckDuckGo HTML
+  global.fetch = async (url) => {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => `
+        <html>
+          <body>
+            <a class="result__snippet" href="/r1">Retrieval evidence snippet text.</a>
+            <a class="result__url" href="/r1">https://example.com/topic</a>
+          </body>
+        </html>
+      `
+    } as any
+  }
+
+  try {
+    const output = await performWebSearch('TypeScript')
+    assert.ok(output.includes('Retrieval evidence snippet text.'), 'Parsed search output should contain stubbed snippet text')
+    assert.ok(output.includes('https://example.com/topic'), 'Parsed search output should contain stubbed title')
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('performWebSearch utility (failure branch)', async () => {
+  const originalFetch = global.fetch
+
+  // Stub global.fetch to simulate a failure
+  global.fetch = async (url) => {
+    return {
+      ok: false,
+      status: 500,
+      text: async () => 'Internal Server Error'
+    } as any
+  }
+
+  try {
+    const output = await performWebSearch('TypeScript')
+    assert.ok(output.includes('Error: Web search could not be completed'), 'Failure branch should indicate web search could not be completed')
+  } finally {
+    global.fetch = originalFetch
+  }
 })
 
 test('execPromise execution utility', async () => {
-  const result = await execPromise('echo "Hello Agent"')
-  assert.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should correctly capture stdout of executed command')
+  const result = await execPromise('echo Hello Agent')
+  assert.strictEqual(result.stdout.trim(), 'Hello Agent', 'Should capture stdout of echo Hello Agent command')
+})
+
+test('isValidUrl SSRF and DNS verification utility', async () => {
+  // Test valid public endpoints
+  assert.ok(await isValidUrl('https://example.com'))
+  assert.ok(await isValidUrl('http://google.com/search'))
+
+  // Test local IP address ranges & loopbacks (must be blocked)
+  assert.strictEqual(await isValidUrl('http://127.0.0.1:3000'), false)
+  assert.strictEqual(await isValidUrl('http://localhost:8080'), false)
+  assert.strictEqual(await isValidUrl('https://10.0.0.1'), false)
+  assert.strictEqual(await isValidUrl('http://192.168.1.1'), false)
+  assert.strictEqual(await isValidUrl('http://169.254.169.254'), false)
+})
+
+test('parseCommandArgs shell command parser', () => {
+  const args = parseCommandArgs('git commit -m "feat: complete visual testing"')
+  assert.deepStrictEqual(args, ['git', 'commit', '-m', 'feat: complete visual testing'])
+
+  const argsSimple = parseCommandArgs('ls -la src/controllers')
+  assert.deepStrictEqual(argsSimple, ['ls', '-la', 'src/controllers'])
 })
 
 test('Visual Browser Integration & Interactive Human Testing Suite', async (t) => {
