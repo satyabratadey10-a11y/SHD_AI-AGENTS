@@ -15,8 +15,8 @@
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath, jobjectArray jArgs, jobjectArray jEnv) {
-    // Extract raw C-string BEFORE fork in the parent thread (fully fork-safe and deadlock-free)
+Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath) {
+    // Extract raw C-string BEFORE fork in parent thread (deadlock-free!)
     const char *cShell = env->GetStringUTFChars(shellPath, NULL);
     if (!cShell) {
         return -1;
@@ -25,7 +25,6 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
     int ptyMaster;
     pid_t pid;
 
-    // 1. Allocate POSIX pseudo-terminal (PTY)
     ptyMaster = posix_openpt(O_RDWR | O_CLOEXEC);
     if (ptyMaster < 0) {
         LOGE("Failed to open pseudo-terminal master fd");
@@ -48,7 +47,6 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
         return -1;
     }
 
-    // 2. Fork the shell process
     pid = fork();
     if (pid < 0) {
         LOGE("Fork failure");
@@ -58,7 +56,6 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
     }
 
     if (pid == 0) {
-        // Slave/Child Process: Establish controlling terminal (no JVM/JNI references called!)
         setsid();
 
         int ptySlave = open(slaveName, O_RDWR);
@@ -66,7 +63,6 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
             _exit(1);
         }
 
-        // Redirect standard descriptors to PTY slave
         dup2(ptySlave, STDIN_FILENO);
         dup2(ptySlave, STDOUT_FILENO);
         dup2(ptySlave, STDERR_FILENO);
@@ -81,7 +77,6 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
         execvp(cShell, args);
         _exit(127);
     } else {
-        // Master/Parent Process
         LOGI("Successfully spawned shell child pid: %d, master fd: %d", pid, ptyMaster);
         env->ReleaseStringUTFChars(shellPath, cShell);
         return ptyMaster;
@@ -92,7 +87,7 @@ extern "C"
 JNIEXPORT jint JNICALL
 Java_com_cde_app_PtyBridge_writePty(JNIEnv *env, jobject thiz, jint masterFd, jstring jData) {
     const char *cData = env->GetStringUTFChars(jData, NULL);
-    jsize len = env->GetStringLength(jData);
+    jsize len = env->GetStringUTFLength(jData); // Correct write length derived from GetStringUTFLength
 
     int written = write(masterFd, cData, len);
     env->ReleaseStringUTFChars(jData, cData);
@@ -108,5 +103,13 @@ Java_com_cde_app_PtyBridge_readPty(JNIEnv *env, jobject thiz, jint masterFd) {
         return NULL;
     }
     buf[bytesRead] = '\0';
+
+    // Sanitize buffer from non-ASCII/invalid UTF-8 bytes to ensure NewStringUTF never crashes
+    for (int i = 0; i < bytesRead; i++) {
+        if ((unsigned char)buf[i] > 127) {
+            buf[i] = '?';
+        }
+    }
+
     return env->NewStringUTF(buf);
 }

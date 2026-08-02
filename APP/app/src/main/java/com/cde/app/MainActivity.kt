@@ -14,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
@@ -64,6 +65,7 @@ fun MainWorkspace(viewModel: AgentViewModel) {
                 value = auth,
                 onValueChange = { auth = it },
                 label = { Text("Authorization") },
+                visualTransformation = PasswordVisualTransformation(), // Enforce masking of sensitive tokens/keys
                 colors = TextFieldDefaults.outlinedTextFieldColors(textColor = Color.White)
             )
         }

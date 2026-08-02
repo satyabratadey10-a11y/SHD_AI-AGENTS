@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.cde.app"
     compileSdk = 33
+    ndkVersion = "25.1.8937393" // Explicit NDK version assignment to align tools across CI environments
 
     defaultConfig {
         applicationId = "com.cde.app"

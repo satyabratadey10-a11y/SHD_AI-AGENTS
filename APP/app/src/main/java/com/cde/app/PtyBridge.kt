@@ -9,11 +9,7 @@ object PtyBridge {
      * Spawns a native shell process connected over a pseudo-terminal PTY.
      * Returns the Master File Descriptor (fd).
      */
-    external fun spawnPty(
-        shellPath: String,
-        args: Array<String> = emptyArray(),
-        env: Array<String> = emptyArray()
-    ): Int
+    external fun spawnPty(shellPath: String): Int
 
     /**
      * Writes standard commands/inputs to the PTY master descriptor.
