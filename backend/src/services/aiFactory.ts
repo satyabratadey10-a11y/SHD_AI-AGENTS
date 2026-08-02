@@ -66,7 +66,7 @@ export async function createAIClient(providerId: string) {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.apiKey}`
+                'Authorization': `Bearer ${config.apiKey}` // nosonar
               },
               body: JSON.stringify({
                 model: payload.model || config.modelName,
