@@ -60,6 +60,37 @@ export const FileExplorer: React.FC<{ onSelect?: (path: string) => void }> = ({ 
   )
 }
 
+// Style constants defined outside the component to keep JSX pure and security-compliant.
+const MODAL_OVERLAY_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: 'rgba(0,0,0,0.5)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+
+const MODAL_FORM_STYLE: React.CSSProperties = {
+  background: '#1e1e1e',
+  padding: 20,
+  borderRadius: 4,
+  width: '300px'
+}
+
+const FORM_FIELD_STYLE: React.CSSProperties = {
+  display: 'block',
+  marginBottom: 8
+}
+
+const FORM_INPUT_STYLE: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  marginTop: 4
+}
+
 /**
  * AIProviders – displays registered AI model providers and lets the user add new ones.
  * Uses a simple modal form; in a real implementation the modal could be a separate component.
@@ -83,7 +114,7 @@ export const AIProviders: React.FC = () => {
       if (Array.isArray(res.data)) {
         setProviders(res.data)
       } else {
-        console.error('Failed to load providers: response is not an array', res.data)
+        console.warn('Failed to load providers: response format mismatch')
       }
     } catch (e) {
       console.error('Failed to load providers', e)
@@ -115,7 +146,6 @@ export const AIProviders: React.FC = () => {
       setForm({ name: '', type: 'OPENAI', baseURL: '', modelName: '', apiKey: '' })
       fetchProviders()
     } catch (err: any) {
-      console.error('Add provider error', err)
       setError(err.response?.data?.message || err.message || 'Failed to add provider')
     } finally {
       setIsSubmitting(false)
@@ -142,12 +172,9 @@ export const AIProviders: React.FC = () => {
           role="dialog"
           aria-modal="true"
           aria-labelledby="modal-title"
-          style={{
-            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center'
-          }}
+          style={MODAL_OVERLAY_STYLE}
         >
-          <form onSubmit={handleSubmit} style={{ background: '#1e1e1e', padding: 20, borderRadius: 4, width: '300px' }}>
+          <form onSubmit={handleSubmit} style={MODAL_FORM_STYLE}>
             <h4 id="modal-title" style={{ marginTop: 0, marginBottom: 15 }}>Add New Provider</h4>
 
             {error && (
@@ -156,7 +183,7 @@ export const AIProviders: React.FC = () => {
               </div>
             )}
 
-            <label htmlFor="provider-name" style={{ display: 'block', marginBottom: 8 }}>Name:<br />
+            <label htmlFor="provider-name" style={FORM_FIELD_STYLE}>Name:<br />
               <input
                 id="provider-name"
                 type="text"
@@ -165,23 +192,23 @@ export const AIProviders: React.FC = () => {
                 required
                 autoFocus
                 disabled={isSubmitting}
-                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+                style={FORM_INPUT_STYLE}
               />
             </label>
-            <label htmlFor="provider-type" style={{ display: 'block', marginBottom: 8 }}>Type:<br />
+            <label htmlFor="provider-type" style={FORM_FIELD_STYLE}>Type:<br />
               <select
                 id="provider-type"
                 value={form.type}
                 onChange={e => setForm({ ...form, type: e.target.value })}
                 disabled={isSubmitting}
-                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+                style={FORM_INPUT_STYLE}
               >
                 <option value="OPENAI">OPENAI</option>
                 <option value="ANTHROPIC">ANTHROPIC</option>
                 <option value="GENERIC_REST">GENERIC_REST</option>
               </select>
             </label>
-            <label htmlFor="provider-url" style={{ display: 'block', marginBottom: 8 }}>Base URL:<br />
+            <label htmlFor="provider-url" style={FORM_FIELD_STYLE}>Base URL:<br />
               <input
                 id="provider-url"
                 type="url"
@@ -189,10 +216,10 @@ export const AIProviders: React.FC = () => {
                 onChange={e => setForm({ ...form, baseURL: e.target.value })}
                 required
                 disabled={isSubmitting}
-                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+                style={FORM_INPUT_STYLE}
               />
             </label>
-            <label htmlFor="provider-model" style={{ display: 'block', marginBottom: 8 }}>Model Name:<br />
+            <label htmlFor="provider-model" style={FORM_FIELD_STYLE}>Model Name:<br />
               <input
                 id="provider-model"
                 type="text"
@@ -200,7 +227,7 @@ export const AIProviders: React.FC = () => {
                 onChange={e => setForm({ ...form, modelName: e.target.value })}
                 required
                 disabled={isSubmitting}
-                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+                style={FORM_INPUT_STYLE}
               />
             </label>
             <label htmlFor="provider-key" style={{ display: 'block', marginBottom: 15 }}>API Key:<br />
@@ -211,7 +238,7 @@ export const AIProviders: React.FC = () => {
                 onChange={e => setForm({ ...form, apiKey: e.target.value })}
                 required
                 disabled={isSubmitting}
-                style={{ width: '100%', boxSizing: 'border-box', marginTop: 4 }}
+                style={FORM_INPUT_STYLE}
               />
             </label>
 
