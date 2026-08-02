@@ -7,17 +7,23 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 
 class AgentViewModel : ViewModel() {
     val logs = mutableStateListOf<String>()
     val isRunning = mutableStateOf(false)
     val filesList = mutableStateListOf<String>()
+
+    // Model configuration
+    val selectedModel = mutableStateOf("gpt-4o")
 
     private var ptyFd: Int = -1
     private var ptyJob: Job? = null
@@ -26,29 +32,55 @@ class AgentViewModel : ViewModel() {
     private val appSandboxPath = "/data/data/com.cde.app/files"
     private val maxLogsCount = 500
 
+    // Shared logs output buffer to capture terminal commands outcome asynchronously
+    private val shellOutputBuffer = java.lang.StringBuilder()
+
     init {
         // Ensure private app directory exists
         File(appSandboxPath).mkdirs()
 
-        // Spawn local native shell on Android using C++ NDK/JNI with cancellable coroutine Job
+        // Spawns local native shell on Android using C++ NDK/JNI with cancellable Job task
         ptyJob = viewModelScope.launch(Dispatchers.IO) {
             val shell = "/system/bin/sh"
             ptyFd = PtyBridge.spawnPty(shell)
             addLogLine("Successfully spawned native PTY shell process (FD: $ptyFd)")
 
+            val decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE)
+
+            var trailingBytes = byteArrayOf()
+
             try {
                 while (ptyFd > 0) {
-                    val output = PtyBridge.readPty(ptyFd)
-                    if (output != null) {
-                        addLogLine(output)
+                    val rawBytes = PtyBridge.readPty(ptyFd)
+                    if (rawBytes != null) {
+                        val combinedBytes = trailingBytes + rawBytes
+                        val byteBuffer = ByteBuffer.wrap(combinedBytes)
+                        val charBuffer = java.nio.CharBuffer.allocate(combinedBytes.size)
+
+                        decoder.decode(byteBuffer, charBuffer, false)
+                        charBuffer.flip()
+                        val text = charBuffer.toString()
+
+                        addLogLine(text)
+                        synchronized(shellOutputBuffer) {
+                            shellOutputBuffer.append(text)
+                        }
+
+                        // Retain any incomplete trailing multi-byte sequences for next read
+                        val remainingSize = byteBuffer.remaining()
+                        if (remainingSize > 0) {
+                            trailingBytes = ByteArray(remainingSize)
+                            byteBuffer.get(trailingBytes)
+                        } else {
+                            trailingBytes = byteArrayOf()
+                        }
                     }
-                    // Poll with sleep
-                    withContext(Dispatchers.IO) {
-                        Thread.sleep(100)
-                    }
+                    delay(100) // Non-blocking delay
                 }
-            } catch (e: InterruptedException) {
-                // Thread interrupted or cancelled
+            } catch (e: Exception) {
+                // Handle cancellation cleanly
             }
         }
 
@@ -58,7 +90,6 @@ class AgentViewModel : ViewModel() {
     private fun addLogLine(line: String) {
         viewModelScope.launch(Dispatchers.Main) {
             if (logs.size >= maxLogsCount) {
-                // Retain only the most recent logs
                 logs.removeAt(0)
             }
             logs.add(line)
@@ -100,12 +131,14 @@ class AgentViewModel : ViewModel() {
                     // 1. Post request with full history context
                     val rawResponse = callAiModel(history, auth, baseURL)
 
-                    // Normalize and strip out Markdown JSON code fences
+                    // Normalize and strip out Markdown JSON code fences safely using Regex
                     var cleanedJson = rawResponse.trim()
-                    if (cleanedJson.startsWith("```json")) {
-                        cleanedJson = cleanedJson.substring(7, cleanedJson.length - 3).trim()
-                    } else if (cleanedJson.startsWith("```")) {
-                        cleanedJson = cleanedJson.substring(3, cleanedJson.length - 3).trim()
+                    if (cleanedJson.startsWith("```")) {
+                        val regex = Regex("^```(?:json)?\\s*([\\s\\S]*?)(?:```|$)", RegexOption.IGNORE_CASE)
+                        val match = regex.find(cleanedJson)
+                        if (match != null) {
+                            cleanedJson = match.groupValues[1].trim()
+                        }
                     }
 
                     // Append response to history
@@ -142,18 +175,36 @@ class AgentViewModel : ViewModel() {
                                 val canonicalSandbox = File(appSandboxPath).canonicalPath
 
                                 if (!canonicalFile.startsWith(canonicalSandbox + File.separator)) {
-                                    throw SecurityException("Security Block: File write target is outside the app sandbox directory!")
+                                    addLogLine("Security Error: Attempted file write target is outside the sandbox!")
+                                    outcomes.append("Action [writeFile $pathArg]: Failed (Security block: path is outside app sandbox).\n")
+                                } else {
+                                    file.parentFile?.mkdirs()
+                                    file.writeText(content)
+                                    addLogLine("Success: Written file at $pathArg")
+                                    outcomes.append("Action [writeFile $pathArg]: Success.\n")
                                 }
-
-                                file.parentFile?.mkdirs()
-                                file.writeText(content)
-                                addLogLine("Success: Written file at $pathArg")
-                                outcomes.append("Action [writeFile $pathArg]: Success.\n")
                             } else if (type == "runShell") {
                                 val cmd = act.optString("command")
                                 addLogLine("Running PTY shell command: $cmd")
-                                PtyBridge.writePty(ptyFd, "$cmd\n")
-                                outcomes.append("Action [runShell $cmd]: Sent command to local terminal PTY.\n")
+
+                                if (ptyFd <= 0) {
+                                    outcomes.append("Action [runShell $cmd]: Failed (PTY not active).\n")
+                                } else {
+                                    // Clear current output buffer before command submission
+                                    synchronized(shellOutputBuffer) {
+                                        shellOutputBuffer.setLength(0)
+                                    }
+                                    PtyBridge.writePty(ptyFd, "$cmd\n")
+
+                                    // Wait for bounded interval to asynchronously receive outcomes
+                                    delay(2000)
+
+                                    val output: String
+                                    synchronized(shellOutputBuffer) {
+                                        output = shellOutputBuffer.toString()
+                                    }
+                                    outcomes.append("Action [runShell $cmd]: Execution Output:\n$output\n")
+                                }
                             } else {
                                 // Action loop fallback for unrecognized types
                                 addLogLine("Warning: Unrecognized action type ignored: $type")
@@ -167,7 +218,7 @@ class AgentViewModel : ViewModel() {
                             put("content", outcomes.toString())
                         })
                     }
-                    Thread.sleep(1000)
+                    delay(1000) // Non-blocking wait
                 }
             } catch (e: Exception) {
                 addLogLine("Error during agent execution loop: ${e.message}")
@@ -181,49 +232,68 @@ class AgentViewModel : ViewModel() {
     }
 
     private fun callAiModel(history: JSONArray, auth: String, baseURL: String): String {
-        // Enforce HTTPS validation for external model endpoints
-        if (!baseURL.startsWith("https://") && !baseURL.contains("localhost") && !baseURL.contains("127.0.0.1")) {
+        // Enforce HTTPS validation before constructing URL, allowing loopbacks only
+        val parsedUrl = URL(baseURL)
+        val host = parsedUrl.host.lowercase()
+        val protocol = parsedUrl.protocol.lowercase()
+        if (protocol == "http") {
+            if (host != "localhost" && host != "127.0.0.1") {
+                throw IllegalArgumentException("Security Exception: API connection requires a secure HTTPS Base URL!")
+            }
+        } else if (protocol != "https") {
             throw IllegalArgumentException("Security Exception: API connection requires a secure HTTPS Base URL!")
         }
 
         val endpoint = URL("$baseURL/chat/completions")
         val conn = endpoint.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("Authorization", "Bearer $auth")
+        try {
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Authorization", "Bearer $auth")
 
-        // Enforce explicit connect/read timeout boundaries
-        conn.connectTimeout = 10000
-        conn.readTimeout = 10000
-        conn.doOutput = true
+            // Enforce explicit connect/read timeout boundaries
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.doOutput = true
 
-        val requestBody = JSONObject().apply {
-            put("model", "gpt-4o")
-            put("messages", history)
-        }
-
-        conn.outputStream.use { os ->
-            os.write(requestBody.toString().toByteArray())
-        }
-
-        // Bounded response handling: read at most 1MB to prevent out-of-memory or unbounded buffers
-        val maxResponseSize = 1024 * 1024
-        val inputStream = conn.inputStream
-        val buffer = ByteArray(4096)
-        val responseBuilder = java.lang.StringBuilder()
-        var totalBytesRead = 0
-
-        while (true) {
-            val bytesRead = inputStream.read(buffer)
-            if (bytesRead == -1) break
-            totalBytesRead += bytesRead
-            if (totalBytesRead > maxResponseSize) {
-                throw SecurityException("Security Exception: Model response exceeded 1MB safety limits!")
+            val requestBody = JSONObject().apply {
+                put("model", selectedModel.value)
+                put("messages", history)
             }
-            responseBuilder.append(String(buffer, 0, bytesRead))
-        }
 
-        return responseBuilder.toString()
+            conn.outputStream.use { os ->
+                os.write(requestBody.toString().toByteArray())
+            }
+
+            val status = conn.responseCode
+            val isSuccess = status in 200..299
+            val rawStream = if (isSuccess) conn.inputStream else (conn.errorStream ?: conn.inputStream)
+
+            // Secure buffered UTF-8 character decoding up to a maximum safety ceiling of 1MB
+            val reader = rawStream.bufferedReader(Charsets.UTF_8)
+            val responseBuilder = java.lang.StringBuilder()
+            val charBuf = CharArray(2048)
+            var totalChars = 0
+
+            while (true) {
+                val read = reader.read(charBuf)
+                if (read == -1) break
+                totalChars += read
+                if (totalChars > 1024 * 1024) { // 1MB limit
+                    throw SecurityException("Response size exceeded 1MB safety limits!")
+                }
+                responseBuilder.append(charBuf, 0, read)
+            }
+
+            // Parse the OpenAI envelope and extract choices[0].message.content
+            val responseBody = responseBuilder.toString()
+            val envelope = JSONObject(responseBody)
+            val choices = envelope.getJSONArray("choices")
+            val message = choices.getJSONObject(0).getJSONObject("message")
+            return message.getString("content")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     override fun onCleared() {
@@ -231,8 +301,7 @@ class AgentViewModel : ViewModel() {
         // Gracefully signal termination, cancel the Job, and close active ptyFd native resources
         ptyJob?.cancel()
         if (ptyFd > 0) {
-            // Close master fd to kill spawned native child sh process
-            PtyBridge.writePty(ptyFd, "exit\n")
+            PtyBridge.closePty(ptyFd) // Close native master descriptor and reap process cleanly
             ptyFd = -1
         }
     }

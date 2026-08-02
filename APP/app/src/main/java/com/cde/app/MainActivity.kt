@@ -62,6 +62,12 @@ fun MainWorkspace(viewModel: AgentViewModel) {
                 colors = TextFieldDefaults.outlinedTextFieldColors(textColor = Color.White)
             )
             OutlinedTextField(
+                value = viewModel.selectedModel.value,
+                onValueChange = { viewModel.selectedModel.value = it },
+                label = { Text("Model Name") },
+                colors = TextFieldDefaults.outlinedTextFieldColors(textColor = Color.White)
+            )
+            OutlinedTextField(
                 value = auth,
                 onValueChange = { auth = it },
                 label = { Text("Authorization") },

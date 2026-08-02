@@ -58,9 +58,10 @@ export function execFilePromise(
   })
 }
 
-const WORKSPACE_ROOT = process.cwd()
+// Canonicalize WORKSPACE_ROOT at module initialization using the filesystem-resolved process.cwd() value
+const WORKSPACE_ROOT = realpathSync(process.cwd())
 
-/** Confines path resolutions strictly to the workspace root resolving filesystem symlinks for existing targets */
+/** Confines path resolutions strictly to the canonical workspace root resolving filesystem symlinks for existing targets */
 export function resolveInWorkspace(requestedPath: string): string {
   let resolved = path.resolve(WORKSPACE_ROOT, requestedPath)
   try {
@@ -168,12 +169,29 @@ export function parseIpv4ToLong(ip: string): number | null {
   return long >>> 0
 }
 
+/** Extracts first 16-bit block group from IPv6 string representation numerically */
+export function getFirstIpv6Group(ip: string): number | null {
+  const parts = ip.split(':')
+  if (parts.length === 0) return null
+  const firstPart = parts[0]
+  if (firstPart === '') {
+    return 0
+  }
+  const val = parseInt(firstPart, 16)
+  return isNaN(val) ? null : val
+}
+
 /** Resolves hostnames via DNS and blocks SSRF / local IP address ranges using robust range check bounds */
 export async function isValidUrl(urlStr: string, allowLoopback = false): Promise<boolean> {
   try {
     const parsed = new URL(urlStr)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
-    const hostname = parsed.hostname.toLowerCase().trim()
+
+    // Normalize parsed hostname by removing surrounding square brackets from IPv6 literals before comparisons
+    let hostname = parsed.hostname.toLowerCase().trim()
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+      hostname = hostname.substring(1, hostname.length - 1)
+    }
 
     if (hostname === 'localhost' || hostname === '0.0.0.0' || hostname === '::' || hostname === '::1') {
       return allowLoopback
@@ -230,13 +248,19 @@ export async function isValidUrl(urlStr: string, allowLoopback = false): Promise
         // 169.254.0.0/16
         if (ipLong >= 2851995648 && ipLong <= 2852061183) return false
       } else {
-        // IPv6 validation
+        // IPv6 validation using parsed numerical first 16 bits to prevent any zero-compression bypasses
         const normalizedv6 = ip.toLowerCase()
         if (normalizedv6 === '::1' || normalizedv6 === '::') {
           return allowLoopback
         }
-        if (normalizedv6.startsWith('fc') || normalizedv6.startsWith('fd')) return false
-        if (normalizedv6.startsWith('fe8') || normalizedv6.startsWith('fe9') || normalizedv6.startsWith('fea') || normalizedv6.startsWith('feb')) return false
+
+        const first16 = getFirstIpv6Group(normalizedv6)
+        if (first16 !== null) {
+          // Unique Local Addresses (fc00::/7) covers 0xfc00 to 0xfdff -> first16 & 0xfe00 === 0xfc00
+          if ((first16 & 0xfe00) === 0xfc00) return false
+          // Link local (fe80::/10) covers 0xfe80 to 0xfebf -> first16 & 0xffc0 === 0xfe80
+          if ((first16 & 0xffc0) === 0xfe80) return false
+        }
       }
     }
     return true
@@ -549,11 +573,17 @@ If you have completed your task, reply with:
 
             let scannedFilesCount = 0
             let totalMatchesFound = 0
+            const searchStartTime = Date.now()
 
             for (const f of files) {
               scannedFilesCount++
               if (scannedFilesCount > 100 || totalMatchesFound > 200) {
                 break
+              }
+
+              // Guard against potential thread blocking ReDoS patterns via execution timeout checks
+              if (Date.now() - searchStartTime > 1000) {
+                throw new Error('Search pattern execution timeout (potential ReDoS attempt detected).')
               }
 
               try {
@@ -617,9 +647,9 @@ If you have completed your task, reply with:
               }
             }
 
-            // Path containment validation before execution
-            if (program === 'cat' || program === 'ls') {
-              const pathArg = programArgs[0] || '.'
+            // Path containment validation on non-flag arguments before execution
+            const nonFlagArgs = programArgs.filter(arg => !arg.startsWith('-'))
+            for (const pathArg of nonFlagArgs) {
               resolveInWorkspace(pathArg)
             }
 
@@ -631,7 +661,7 @@ If you have completed your task, reply with:
               }
             }
 
-            const { stdout, stderr } = await execFilePromise(program, programArgs, { timeout: 15000 })
+            const { stdout, stderr } = await execFilePromise(program, programArgs, { cwd: WORKSPACE_ROOT, timeout: 15000 })
             resultItem.status = 'success'
             resultItem.output = `Stdout:\n${stdout}\nStderr:\n${stderr}`
           } else if (act.type === 'webSearch') {
@@ -683,6 +713,11 @@ If you have completed your task, reply with:
             resultItem.status = 'success'
             resultItem.output = cleaned.substring(0, 10000)
           } else if (act.type === 'installPackages') {
+            // Validate that act.packages is an array
+            if (!Array.isArray(act.packages)) {
+              throw new Error('Contract failure: packages must be supplied as an array.')
+            }
+
             // Require each package name to begin with letter, digit, or @, and reject package entries starting with "-" or containing hyphens in scope suffix
             const npmRegex = /^[a-zA-Z0-9@][a-zA-Z0-9-_.]*([/@][a-zA-Z0-9_][a-zA-Z0-9-_.]*)*$/
             const validatedNames = act.packages.filter((pkg: string) => npmRegex.test(pkg))
@@ -742,11 +777,16 @@ If you have completed your task, reply with:
               // Request interception to validate every navigation request URL with isValidUrl
               await pageInstance.setRequestInterception(true)
               pageInstance.on('request', async (interceptedRequest: any) => {
-                const reqUrl = interceptedRequest.url()
-                const isReqValid = await isValidUrl(reqUrl, true)
-                if (isReqValid) {
-                  interceptedRequest.continue()
-                } else {
+                try {
+                  const reqUrl = interceptedRequest.url()
+                  const isReqValid = await isValidUrl(reqUrl, true)
+                  if (isReqValid) {
+                    interceptedRequest.continue()
+                  } else {
+                    interceptedRequest.abort()
+                  }
+                } catch {
+                  // Catch all handler exceptions securely
                   interceptedRequest.abort()
                 }
               })

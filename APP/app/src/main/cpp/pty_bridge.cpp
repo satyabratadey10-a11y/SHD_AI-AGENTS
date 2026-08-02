@@ -13,6 +13,8 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+static pid_t childPid = -1;
+
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath) {
@@ -78,6 +80,7 @@ Java_com_cde_app_PtyBridge_spawnPty(JNIEnv *env, jobject thiz, jstring shellPath
         _exit(127);
     } else {
         LOGI("Successfully spawned shell child pid: %d, master fd: %d", pid, ptyMaster);
+        childPid = pid; // Retain spawned child pid in native state
         env->ReleaseStringUTFChars(shellPath, cShell);
         return ptyMaster;
     }
@@ -87,29 +90,49 @@ extern "C"
 JNIEXPORT jint JNICALL
 Java_com_cde_app_PtyBridge_writePty(JNIEnv *env, jobject thiz, jint masterFd, jstring jData) {
     const char *cData = env->GetStringUTFChars(jData, NULL);
+    if (!cData) {
+        return -1;
+    }
     jsize len = env->GetStringUTFLength(jData); // Correct write length derived from GetStringUTFLength
 
-    int written = write(masterFd, cData, len);
+    jsize totalWritten = 0;
+    while (totalWritten < len) {
+        int written = write(masterFd, cData + totalWritten, len - totalWritten);
+        if (written <= 0) {
+            break;
+        }
+        totalWritten += written;
+    }
+
     env->ReleaseStringUTFChars(jData, cData);
-    return written;
+    return totalWritten;
 }
 
 extern "C"
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_com_cde_app_PtyBridge_readPty(JNIEnv *env, jobject thiz, jint masterFd) {
     char buf[1024];
-    int bytesRead = read(masterFd, buf, sizeof(buf) - 1);
+    int bytesRead = read(masterFd, buf, sizeof(buf));
     if (bytesRead <= 0) {
         return NULL;
     }
-    buf[bytesRead] = '\0';
 
-    // Sanitize buffer from non-ASCII/invalid UTF-8 bytes to ensure NewStringUTF never crashes
-    for (int i = 0; i < bytesRead; i++) {
-        if ((unsigned char)buf[i] > 127) {
-            buf[i] = '?';
-        }
+    jbyteArray array = env->NewByteArray(bytesRead);
+    if (!array) {
+        return NULL;
     }
+    env->SetByteArrayRegion(array, 0, bytesRead, (jbyte*)buf);
+    return array;
+}
 
-    return env->NewStringUTF(buf);
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_cde_app_PtyBridge_closePty(JNIEnv *env, jobject thiz, jint masterFd) {
+    int res = close(masterFd);
+    if (childPid > 0) {
+        int status;
+        waitpid(childPid, &status, WNOHANG); // Reap the child with waitpid to prevent zombies
+        childPid = -1;
+    }
+    return res;
 }
