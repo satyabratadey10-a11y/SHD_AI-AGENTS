@@ -41,6 +41,12 @@ async function createAIClient(providerId) {
         client = new sdk_1.Anthropic({ apiKey: config.apiKey });
     }
     else {
+        // Generic REST client mock
+        client = {
+            chat: async (payload) => {
+                return {
+                    choices: [{ message: { content: JSON.stringify({ actions: [] }) } }]
+                };
         // Generic REST client - full OpenAI-compatible API caller
         client = {
             chat: {
